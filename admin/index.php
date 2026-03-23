@@ -187,7 +187,7 @@ render_header('Admin Dashboard');
 					<tr>
 						<td><?php echo e((string) $pixel['pixel_key']); ?></td>
 						<td><?php echo e((string) $pixel['total_hits']); ?></td>
-						<td><?php echo e((string) ($pixel['last_hit_at'] ?: '-')); ?></td>
+						<td><?php echo e(format_db_datetime((string) ($pixel['last_hit_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
 						<td>
 							<span class="inline" style="display:flex;align-items:center;gap:8px;">
 								<input id="embed-url-<?php echo (int) $pixel['id']; ?>" value="<?php echo e($embed); ?>" readonly onclick="this.select()" style="flex:1;min-width:220px;width:auto;">

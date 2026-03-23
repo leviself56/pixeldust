@@ -37,16 +37,8 @@ if (!in_array($period, $validPeriods, true)) {
 	$period = '7d';
 }
 
-if ($period === '24h') {
-	$intervalExpr = 'INTERVAL 24 HOUR';
-	$groupFmt = '%Y-%m-%d %H:00:00';
-} elseif ($period === '30d') {
-	$intervalExpr = 'INTERVAL 30 DAY';
-	$groupFmt = '%Y-%m-%d';
-} else {
-	$intervalExpr = 'INTERVAL 7 DAY';
-	$groupFmt = '%Y-%m-%d';
-}
+$chartBucketFormat = $period === '24h' ? 'Y-m-d H:00:00' : 'Y-m-d';
+$periodIntervalSpec = $period === '24h' ? 'PT24H' : ($period === '30d' ? 'P30D' : 'P7D');
 
 $pixels = db()->query('SELECT pixel_key, total_hits FROM pd_pixels ORDER BY pixel_key ASC')->fetchAll();
 
@@ -65,19 +57,38 @@ $recentHitsTotal = 0;
 $recentHitsTotalPages = 1;
 
 if ($selectedPixel) {
-	$chartSql =
-		'SELECT DATE_FORMAT(hit_at, :group_fmt) AS bucket, COUNT(*) AS hit_count
-		 FROM pd_pixel_hits
-		 WHERE pixel_id = :pixel_id AND hit_at >= (NOW() - ' . $intervalExpr . ')
-		 GROUP BY bucket
-		 ORDER BY bucket ASC';
+	$cutoffUtc = (new DateTimeImmutable('now', new DateTimeZone('UTC')))
+		->sub(new DateInterval($periodIntervalSpec))
+		->format('Y-m-d H:i:s');
 
-	$chartStmt = db()->prepare($chartSql);
+	$chartStmt = db()->prepare(
+		'SELECT hit_at
+		 FROM pd_pixel_hits
+		 WHERE pixel_id = :pixel_id AND hit_at >= :cutoff_utc
+		 ORDER BY hit_at ASC'
+	);
 	$chartStmt->execute([
-		'group_fmt' => $groupFmt,
 		'pixel_id' => (int) $selectedPixel['id'],
+		'cutoff_utc' => $cutoffUtc,
 	]);
-	$chartData = $chartStmt->fetchAll();
+	$chartRows = $chartStmt->fetchAll();
+
+	$bucketMap = [];
+	foreach ($chartRows as $chartRow) {
+		$hitUtc = parse_db_datetime_utc((string) ($chartRow['hit_at'] ?? ''));
+		if (!$hitUtc) {
+			continue;
+		}
+		$bucket = $hitUtc->setTimezone(app_timezone_object())->format($chartBucketFormat);
+		$bucketMap[$bucket] = (int) ($bucketMap[$bucket] ?? 0) + 1;
+	}
+	ksort($bucketMap);
+	foreach ($bucketMap as $bucket => $bucketCount) {
+		$chartData[] = [
+			'bucket' => $bucket,
+			'hit_count' => $bucketCount,
+		];
+	}
 
 	$totalStmt = db()->prepare(
 		'SELECT COUNT(*) AS total
@@ -204,7 +215,7 @@ render_header('Stats');
 <?php if ($selectedPixel): ?>
 	<div class="card">
 		<h2><?php echo e((string) $selectedPixel['pixel_key']); ?></h2>
-		<p class="muted">Total hits: <?php echo e((string) $selectedPixel['total_hits']); ?> | Created: <?php echo e((string) $selectedPixel['created_at']); ?></p>
+		<p class="muted">Total hits: <?php echo e((string) $selectedPixel['total_hits']); ?> | Created: <?php echo e(format_db_datetime((string) ($selectedPixel['created_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?> (<?php echo e(app_timezone_name()); ?>)</p>
 		<?php echo render_svg_chart($chartData); ?>
 	</div>
 
@@ -230,7 +241,7 @@ render_header('Stats');
 			<?php else: ?>
 				<?php foreach ($recentHits as $hit): ?>
 					<tr>
-						<td><?php echo e((string) $hit['hit_at']); ?></td>
+						<td><?php echo e(format_db_datetime((string) ($hit['hit_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
 						<td><?php echo e((string) $hit['ip_address']); ?></td>
 						<td><?php echo e((string) ($hit['referrer'] ?: '-')); ?></td>
 						<td><?php echo e((string) ($hit['user_agent'] ?: '-')); ?></td>

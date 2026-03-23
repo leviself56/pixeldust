@@ -39,7 +39,55 @@ function db(): PDO
 		PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
 	]);
 
+	try {
+		$pdo->exec("SET time_zone = '+00:00'");
+	} catch (Throwable $e) {
+	}
+
 	return $pdo;
+}
+
+function app_timezone_name(): string
+{
+	return (string) (app_config()['app']['timezone'] ?? 'UTC');
+}
+
+function app_timezone_object(): DateTimeZone
+{
+	try {
+		return new DateTimeZone(app_timezone_name());
+	} catch (Throwable $e) {
+		return new DateTimeZone('UTC');
+	}
+}
+
+function parse_db_datetime_utc(?string $value): ?DateTimeImmutable
+{
+	if ($value === null || trim($value) === '') {
+		return null;
+	}
+
+	$value = trim($value);
+	$dateTime = DateTimeImmutable::createFromFormat('Y-m-d H:i:s', $value, new DateTimeZone('UTC'));
+	if ($dateTime instanceof DateTimeImmutable) {
+		return $dateTime;
+	}
+
+	try {
+		return new DateTimeImmutable($value, new DateTimeZone('UTC'));
+	} catch (Throwable $e) {
+		return null;
+	}
+}
+
+function format_db_datetime(?string $value, string $format = 'Y-m-d H:i:s', string $empty = '-'): string
+{
+	$dateTimeUtc = parse_db_datetime_utc($value);
+	if (!$dateTimeUtc) {
+		return $empty;
+	}
+
+	return $dateTimeUtc->setTimezone(app_timezone_object())->format($format);
 }
 
 function is_installed(): bool

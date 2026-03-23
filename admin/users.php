@@ -195,8 +195,8 @@ render_header('User Management');
 				<tr>
 					<td><?php echo e((string) $user['id']); ?></td>
 					<td><?php echo e((string) $user['username']); ?><?php echo (int) $user['id'] === (int) $currentAdmin['id'] ? ' (you)' : ''; ?></td>
-					<td><?php echo e((string) $user['created_at']); ?></td>
-					<td><?php echo e((string) ($user['last_login_at'] ?: '-')); ?></td>
+					<td><?php echo e(format_db_datetime((string) ($user['created_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
+					<td><?php echo e(format_db_datetime((string) ($user['last_login_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
 					<td>
 						<div class="inline">
 							<a class="nav-btn" href="users.php?edit_id=<?php echo (int) $user['id']; ?>">Edit</a>
