@@ -26,7 +26,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 			$isDefault = isset($_POST['is_default']) ? 1 : 0;
 			$triggerDbId = (int) ($_POST['trigger_db_id'] ?? 0);
 
-			if ($isDefault === 1) {
+			if ($isActive === 0) {
+				$isDefault = 0;
+			} elseif ($isDefault === 1) {
 				$isActive = 1;
 			}
 
