@@ -179,6 +179,10 @@ render_header('Admin Dashboard');
 
 <div class="card">
 	<h2>Pixels</h2>	
+	<p>
+		<label for="pixel-search">Search Pixel IDs</label>
+		<input type="text" id="pixel-search" placeholder="Type or paste a pixel id to filter" oninput="filterPixelRows(this.value)">
+	</p>
 	<?php if ($pixels): ?>
 		<?php
 		$quickIds = [];
@@ -199,7 +203,7 @@ render_header('Admin Dashboard');
 		</thead>
 		<tbody>
 			<?php if (!$pixels): ?>
-				<tr><td colspan="5" class="muted">No pixels yet.</td></tr>
+				<tr id="pixel-empty-row"><td colspan="5" class="muted">No pixels yet.</td></tr>
 			<?php else: ?>
 				<?php foreach ($pixels as $pixel): ?>
 						<?php
@@ -208,7 +212,7 @@ render_header('Admin Dashboard');
 							$embed .= '&trigger=' . urlencode($defaultTriggerId);
 						}
 						?>
-					<tr>
+					<tr class="pixel-row" data-pixel-key="<?php echo e((string) $pixel['pixel_key']); ?>">
 						<td><?php echo e((string) $pixel['pixel_key']); ?></td>
 						<td><?php echo e((string) $pixel['total_hits']); ?></td>
 						<td><?php echo e(format_db_datetime((string) ($pixel['last_hit_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
@@ -270,6 +274,27 @@ function copyToClipboard(inputId, buttonEl) {
 var pixelKeyInput = document.getElementById('pixel_key');
 if (pixelKeyInput) {
 	pixelKeyInput.value = sanitizePixelKeyValue(pixelKeyInput.value);
+}
+
+function filterPixelRows(term) {
+	var query = (term || '').toLowerCase().trim();
+	var rows = document.querySelectorAll('tr.pixel-row');
+	for (var i = 0; i < rows.length; i++) {
+		var row = rows[i];
+		var pixelKey = (row.getAttribute('data-pixel-key') || '').toLowerCase();
+		var isMatch = query === '' || pixelKey.indexOf(query) !== -1;
+		row.style.display = isMatch ? '' : 'none';
+	}
+}
+
+var pixelSearchInput = document.getElementById('pixel-search');
+if (pixelSearchInput) {
+	pixelSearchInput.addEventListener('paste', function () {
+		var self = this;
+		setTimeout(function () {
+			filterPixelRows(self.value);
+		}, 0);
+	});
 }
 </script>
 <?php
