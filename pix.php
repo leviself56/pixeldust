@@ -15,6 +15,10 @@ $pixelKey = trim((string) ($_GET['id'] ?? 'default'));
 if ($pixelKey === '') {
 	$pixelKey = 'default';
 }
+$pixelKey = sanitize_pixel_key($pixelKey);
+if ($pixelKey === '') {
+	$pixelKey = 'default';
+}
 
 $explicitTriggerId = trim((string) ($_GET['trigger'] ?? ''));
 if ($explicitTriggerId === '') {

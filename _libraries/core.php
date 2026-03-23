@@ -124,9 +124,30 @@ function require_admin(): void
 	}
 }
 
-function create_pixel_if_missing(string $pixelKey, ?int $createdBy = null): int
+function sanitize_pixel_key(string $pixelKey): string
 {
 	$pixelKey = trim($pixelKey);
+	if ($pixelKey === '') {
+		return '';
+	}
+
+	$pixelKey = preg_replace('/\s+/', '_', $pixelKey);
+	if (function_exists('mb_strtolower')) {
+		$pixelKey = mb_strtolower($pixelKey, 'UTF-8');
+	} else {
+		$pixelKey = strtolower($pixelKey);
+	}
+
+	$pixelKey = preg_replace('/[^a-z0-9_]/', '', $pixelKey);
+	$pixelKey = preg_replace('/_+/', '_', $pixelKey);
+	$pixelKey = trim($pixelKey, '_');
+
+	return $pixelKey;
+}
+
+function create_pixel_if_missing(string $pixelKey, ?int $createdBy = null): int
+{
+	$pixelKey = sanitize_pixel_key($pixelKey);
 	if ($pixelKey === '') {
 		throw new InvalidArgumentException('Pixel key is required.');
 	}

@@ -12,10 +12,11 @@ $successMsg = flash('success');
 $createdPixelKey = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-	$pixelKey = trim((string) ($_POST['pixel_key'] ?? ''));
+	$rawPixelKey = trim((string) ($_POST['pixel_key'] ?? ''));
+	$pixelKey = sanitize_pixel_key($rawPixelKey);
 
 	if ($pixelKey === '') {
-		$error = 'Pixel id is required.';
+		$error = 'Pixel id is required and must contain letters and/or numbers.';
 	} else {
 		try {
 			$existingStmt = db()->prepare('SELECT id, created_at FROM pd_pixels WHERE pixel_key = :pixel_key LIMIT 1');
@@ -143,7 +144,8 @@ render_header('Admin Dashboard');
 	<form method="post" class="inline">
 		<div style="flex:1;min-width:240px;">
 			<label>Pixel ID (example: blog_post_title)</label>
-			<input type="text" name="pixel_key" required maxlength="191" placeholder="blog_post_title">
+			<input type="text" id="pixel_key" name="pixel_key" required maxlength="191" placeholder="blog_post_title" oninput="sanitizePixelKeyInput(this)">
+			<p class="muted">Spaces become underscores. Only letters, numbers, and underscores are kept.</p>
 		</div>
 		<div style="padding-top:22px;">
 			<button type="submit">Create</button>
@@ -200,6 +202,22 @@ render_header('Admin Dashboard');
 	</table>
 </div>
 <script>
+function sanitizePixelKeyValue(value) {
+	var sanitized = (value || '').trim().toLowerCase();
+	sanitized = sanitized.replace(/\s+/g, '_');
+	sanitized = sanitized.replace(/[^a-z0-9_]/g, '');
+	sanitized = sanitized.replace(/_+/g, '_');
+	sanitized = sanitized.replace(/^_+|_+$/g, '');
+	return sanitized;
+}
+
+function sanitizePixelKeyInput(inputEl) {
+	if (!inputEl) {
+		return;
+	}
+	inputEl.value = sanitizePixelKeyValue(inputEl.value);
+}
+
 function copyToClipboard(inputId, buttonEl) {
 	var input = document.getElementById(inputId);
 	if (!input) {
@@ -223,6 +241,11 @@ function copyToClipboard(inputId, buttonEl) {
 	} catch (e) {
 		document.execCommand('copy');
 	}
+}
+
+var pixelKeyInput = document.getElementById('pixel_key');
+if (pixelKeyInput) {
+	pixelKeyInput.value = sanitizePixelKeyValue(pixelKeyInput.value);
 }
 </script>
 <?php

@@ -73,6 +73,7 @@ if (!$admin || !password_verify($apiPass, (string) $admin['password_hash'])) {
 }
 
 $pixelKey = trim((string) ($_GET['id'] ?? ''));
+$pixelKey = sanitize_pixel_key($pixelKey);
 if ($pixelKey === '') {
 	api_json_response([
 		'ok' => false,
