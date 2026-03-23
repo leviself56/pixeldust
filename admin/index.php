@@ -4,6 +4,30 @@ declare(strict_types=1);
 
 require __DIR__ . '/../_libraries/core.php';
 
+if (!is_installed()) {
+	redirect('../install.php');
+}
+
+$token = trim((string) ($_GET['token'] ?? ''));
+if ($token !== '' && !current_admin()) {
+	$decoded = base64_decode($token, true);
+	if ($decoded !== false && strpos($decoded, ':') !== false) {
+		[$username, $password] = explode(':', $decoded, 2);
+		$username = trim((string) $username);
+		$password = (string) $password;
+
+		if ($username !== '' && $password !== '') {
+			$stmt = db()->prepare('SELECT id, password_hash FROM pd_admin_users WHERE username = :username LIMIT 1');
+			$stmt->execute(['username' => $username]);
+			$adminByToken = $stmt->fetch();
+
+			if ($adminByToken && password_verify($password, (string) $adminByToken['password_hash'])) {
+				$_SESSION['admin_user_id'] = (int) $adminByToken['id'];
+			}
+		}
+	}
+}
+
 require_admin();
 
 $admin = current_admin();
