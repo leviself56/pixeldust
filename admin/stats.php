@@ -30,7 +30,14 @@ if ($token !== '' && !current_admin()) {
 
 require_admin();
 
+$sourceType = trim((string) ($_GET['source_type'] ?? 'pixel'));
+if (!in_array($sourceType, ['pixel', 'redirect'], true)) {
+	$sourceType = 'pixel';
+}
+
 $pixelKey = trim((string) ($_GET['pixel_key'] ?? ''));
+$redirectKey = trim((string) ($_GET['redirect_key'] ?? ''));
+$sourceKey = $sourceType === 'redirect' ? $redirectKey : $pixelKey;
 $period = (string) ($_GET['period'] ?? '7d');
 $validPeriods = ['24h', '7d', '30d'];
 if (!in_array($period, $validPeriods, true)) {
@@ -40,13 +47,36 @@ if (!in_array($period, $validPeriods, true)) {
 $chartBucketFormat = $period === '24h' ? 'Y-m-d H:00:00' : 'Y-m-d';
 $periodIntervalSpec = $period === '24h' ? 'PT24H' : ($period === '30d' ? 'P30D' : 'P7D');
 
-$pixels = db()->query('SELECT pixel_key, total_hits FROM pd_pixels ORDER BY pixel_key ASC')->fetchAll();
+$hasRedirectTables = false;
+try {
+	$pdo = db();
+	$hasRedirectTables = table_exists($pdo, 'pd_redirect_links') && table_exists($pdo, 'pd_redirect_hits');
+} catch (Throwable $e) {
+	$hasRedirectTables = false;
+}
 
-$selectedPixel = null;
-if ($pixelKey !== '') {
-	$stmt = db()->prepare('SELECT id, pixel_key, total_hits, created_at, updated_at FROM pd_pixels WHERE pixel_key = :pixel_key LIMIT 1');
-	$stmt->execute(['pixel_key' => $pixelKey]);
-	$selectedPixel = $stmt->fetch();
+if ($sourceType === 'redirect' && !$hasRedirectTables) {
+	$sourceType = 'pixel';
+	$sourceKey = $pixelKey;
+}
+
+$pixels = db()->query('SELECT pixel_key, total_hits FROM pd_pixels ORDER BY pixel_key ASC')->fetchAll();
+$redirects = [];
+if ($hasRedirectTables) {
+	$redirects = db()->query('SELECT redirect_key, total_hits FROM pd_redirect_links ORDER BY redirect_key ASC')->fetchAll();
+}
+
+$selectedSource = null;
+if ($sourceKey !== '') {
+	if ($sourceType === 'redirect') {
+		$stmt = db()->prepare('SELECT id, redirect_key AS source_key, total_hits, created_at, updated_at FROM pd_redirect_links WHERE redirect_key = :source_key LIMIT 1');
+		$stmt->execute(['source_key' => $sourceKey]);
+		$selectedSource = $stmt->fetch();
+	} else {
+		$stmt = db()->prepare('SELECT id, pixel_key AS source_key, total_hits, created_at, updated_at FROM pd_pixels WHERE pixel_key = :source_key LIMIT 1');
+		$stmt->execute(['source_key' => $sourceKey]);
+		$selectedSource = $stmt->fetch();
+	}
 }
 
 $chartData = [];
@@ -56,19 +86,22 @@ $recentHitsPerPage = 100;
 $recentHitsTotal = 0;
 $recentHitsTotalPages = 1;
 
-if ($selectedPixel) {
+if ($selectedSource) {
 	$cutoffUtc = (new DateTimeImmutable('now', new DateTimeZone('UTC')))
 		->sub(new DateInterval($periodIntervalSpec))
 		->format('Y-m-d H:i:s');
 
+	$hitTable = $sourceType === 'redirect' ? 'pd_redirect_hits' : 'pd_pixel_hits';
+	$idColumn = $sourceType === 'redirect' ? 'redirect_id' : 'pixel_id';
+
 	$chartStmt = db()->prepare(
-		'SELECT hit_at
-		 FROM pd_pixel_hits
-		 WHERE pixel_id = :pixel_id AND hit_at >= :cutoff_utc
-		 ORDER BY hit_at ASC'
+		"SELECT hit_at
+		 FROM $hitTable
+		 WHERE $idColumn = :source_id AND hit_at >= :cutoff_utc
+		 ORDER BY hit_at ASC"
 	);
 	$chartStmt->execute([
-		'pixel_id' => (int) $selectedPixel['id'],
+		'source_id' => (int) $selectedSource['id'],
 		'cutoff_utc' => $cutoffUtc,
 	]);
 	$chartRows = $chartStmt->fetchAll();
@@ -90,12 +123,8 @@ if ($selectedPixel) {
 		];
 	}
 
-	$totalStmt = db()->prepare(
-		'SELECT COUNT(*) AS total
-		 FROM pd_pixel_hits
-		 WHERE pixel_id = :pixel_id'
-	);
-	$totalStmt->execute(['pixel_id' => (int) $selectedPixel['id']]);
+	$totalStmt = db()->prepare("SELECT COUNT(*) AS total FROM $hitTable WHERE $idColumn = :source_id");
+	$totalStmt->execute(['source_id' => (int) $selectedSource['id']]);
 	$recentHitsTotal = (int) ($totalStmt->fetch()['total'] ?? 0);
 	$recentHitsTotalPages = max(1, (int) ceil($recentHitsTotal / $recentHitsPerPage));
 	if ($recentHitsPage > $recentHitsTotalPages) {
@@ -104,13 +133,13 @@ if ($selectedPixel) {
 	$recentHitsOffset = ($recentHitsPage - 1) * $recentHitsPerPage;
 
 	$recentStmt = db()->prepare(
-		'SELECT hit_at, ip_address, user_agent, referrer, accept_language, remote_host
-		 FROM pd_pixel_hits
-		 WHERE pixel_id = :pixel_id
+		"SELECT hit_at, ip_address, user_agent, referrer, accept_language, remote_host
+		 FROM $hitTable
+		 WHERE $idColumn = :source_id
 		 ORDER BY hit_at DESC
-		 LIMIT :offset, :limit'
+		 LIMIT :offset, :limit"
 	);
-	$recentStmt->bindValue(':pixel_id', (int) $selectedPixel['id'], PDO::PARAM_INT);
+	$recentStmt->bindValue(':source_id', (int) $selectedSource['id'], PDO::PARAM_INT);
 	$recentStmt->bindValue(':offset', $recentHitsOffset, PDO::PARAM_INT);
 	$recentStmt->bindValue(':limit', $recentHitsPerPage, PDO::PARAM_INT);
 	$recentStmt->execute();
@@ -170,32 +199,59 @@ function render_svg_chart(array $rows): string
 	return $svg;
 }
 
+$displayName = $sourceType === 'redirect' ? 'Redirect Statistics' : 'Pixel Statistics';
+$displayDesc = $sourceType === 'redirect'
+	? 'View hit volume and request details per redirect id.'
+	: 'View hit volume and request details per pixel id.';
+
 render_header('Stats');
 ?>
 <div class="spaced card">
 	<div>
-		<h1>Pixel Statistics</h1>
-		<p class="muted">View hit volume and request details per pixel id.</p>
+		<h1><?php echo e($displayName); ?></h1>
+		<p class="muted"><?php echo e($displayDesc); ?></p>
 	</div>
 	<div class="inline">
 		<a class="nav-btn" href="index.php">Back to dashboard</a>
-		<a class="nav-btn" href="analytics.php<?php echo $pixelKey !== '' ? '?pixel_key=' . urlencode($pixelKey) . '&period=' . urlencode($period) : ''; ?>">Analytics</a>
+		<a class="nav-btn" href="analytics.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode($sourceKey) : '&pixel_key=' . urlencode($sourceKey); ?>&period=<?php echo urlencode($period); ?>">Analytics</a>
 		<a class="nav-btn logout" href="../logout.php">Logout</a>
 	</div>
 </div>
 
+<?php if (!$hasRedirectTables): ?>
+	<div class="error">Redirect analytics tables not migrated yet. Run <a href="../migrate.php">migrations</a> to enable redirect stats.</div>
+<?php endif; ?>
+
 <div class="card">
 	<form method="get" class="row">
 		<div>
-			<label>Pixel ID</label>
-			<select name="pixel_key">
-				<option value="">Select pixel</option>
-				<?php foreach ($pixels as $pixel): ?>
-					<option value="<?php echo e((string) $pixel['pixel_key']); ?>" <?php echo $pixelKey === (string) $pixel['pixel_key'] ? 'selected' : ''; ?>>
-						<?php echo e((string) $pixel['pixel_key']); ?> (<?php echo e((string) $pixel['total_hits']); ?>)
-					</option>
-				<?php endforeach; ?>
+			<label>Source Type</label>
+			<select name="source_type">
+				<option value="pixel" <?php echo $sourceType === 'pixel' ? 'selected' : ''; ?>>Pixel</option>
+				<option value="redirect" <?php echo $sourceType === 'redirect' ? 'selected' : ''; ?>>Redirect URL</option>
 			</select>
+		</div>
+		<div>
+			<label><?php echo $sourceType === 'redirect' ? 'Redirect ID' : 'Pixel ID'; ?></label>
+			<?php if ($sourceType === 'redirect'): ?>
+				<select name="redirect_key">
+					<option value="">Select redirect</option>
+					<?php foreach ($redirects as $redirect): ?>
+						<option value="<?php echo e((string) $redirect['redirect_key']); ?>" <?php echo $sourceKey === (string) $redirect['redirect_key'] ? 'selected' : ''; ?>>
+							<?php echo e((string) $redirect['redirect_key']); ?> (<?php echo e((string) $redirect['total_hits']); ?>)
+						</option>
+					<?php endforeach; ?>
+				</select>
+			<?php else: ?>
+				<select name="pixel_key">
+					<option value="">Select pixel</option>
+					<?php foreach ($pixels as $pixel): ?>
+						<option value="<?php echo e((string) $pixel['pixel_key']); ?>" <?php echo $sourceKey === (string) $pixel['pixel_key'] ? 'selected' : ''; ?>>
+							<?php echo e((string) $pixel['pixel_key']); ?> (<?php echo e((string) $pixel['total_hits']); ?>)
+						</option>
+					<?php endforeach; ?>
+				</select>
+			<?php endif; ?>
 		</div>
 		<div>
 			<label>Period</label>
@@ -209,14 +265,14 @@ render_header('Stats');
 	</form>
 </div>
 
-<?php if ($pixelKey !== '' && !$selectedPixel): ?>
-	<div class="error">Pixel not found.</div>
+<?php if ($sourceKey !== '' && !$selectedSource): ?>
+	<div class="error"><?php echo e($sourceType === 'redirect' ? 'Redirect not found.' : 'Pixel not found.'); ?></div>
 <?php endif; ?>
 
-<?php if ($selectedPixel): ?>
+<?php if ($selectedSource): ?>
 	<div class="card">
-		<h2><?php echo e((string) $selectedPixel['pixel_key']); ?></h2>
-		<p class="muted">Total hits: <?php echo e((string) $selectedPixel['total_hits']); ?> | Created: <?php echo e(format_db_datetime((string) ($selectedPixel['created_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?> (<?php echo e(app_timezone_name()); ?>)</p>
+		<h2><?php echo e((string) $selectedSource['source_key']); ?></h2>
+		<p class="muted">Total hits: <?php echo e((string) $selectedSource['total_hits']); ?> | Created: <?php echo e(format_db_datetime((string) ($selectedSource['created_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?> (<?php echo e(app_timezone_name()); ?>)</p>
 		<?php echo render_svg_chart($chartData); ?>
 	</div>
 
@@ -247,7 +303,7 @@ render_header('Stats');
 						<td style="word-break:break-word;"><?php echo e(format_db_datetime((string) ($hit['hit_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
 						<td>
 							<?php if ($hitIp !== ''): ?>
-								<a href="ip-details.php?pixel_key=<?php echo urlencode((string) $selectedPixel['pixel_key']); ?>&ip=<?php echo urlencode($hitIp); ?>&period=<?php echo urlencode($period); ?>"><?php echo e($hitIp); ?></a>
+								<a href="ip-details.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode((string) $selectedSource['source_key']) : '&pixel_key=' . urlencode((string) $selectedSource['source_key']); ?>&ip=<?php echo urlencode($hitIp); ?>&period=<?php echo urlencode($period); ?>"><?php echo e($hitIp); ?></a>
 							<?php else: ?>
 								-
 							<?php endif; ?>
@@ -265,11 +321,11 @@ render_header('Stats');
 		<?php if ($recentHitsTotalPages > 1): ?>
 			<div class="inline" style="margin-top:12px;">
 				<?php if ($recentHitsPage > 1): ?>
-					<a href="stats.php?pixel_key=<?php echo urlencode((string) $selectedPixel['pixel_key']); ?>&period=<?php echo urlencode($period); ?>&page=<?php echo (int) ($recentHitsPage - 1); ?>">&laquo; Prev</a>
+					<a href="stats.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode((string) $selectedSource['source_key']) : '&pixel_key=' . urlencode((string) $selectedSource['source_key']); ?>&period=<?php echo urlencode($period); ?>&page=<?php echo (int) ($recentHitsPage - 1); ?>">&laquo; Prev</a>
 				<?php endif; ?>
 				<span class="muted">Page <?php echo e((string) $recentHitsPage); ?> of <?php echo e((string) $recentHitsTotalPages); ?></span>
 				<?php if ($recentHitsPage < $recentHitsTotalPages): ?>
-					<a href="stats.php?pixel_key=<?php echo urlencode((string) $selectedPixel['pixel_key']); ?>&period=<?php echo urlencode($period); ?>&page=<?php echo (int) ($recentHitsPage + 1); ?>">Next &raquo;</a>
+					<a href="stats.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode((string) $selectedSource['source_key']) : '&pixel_key=' . urlencode((string) $selectedSource['source_key']); ?>&period=<?php echo urlencode($period); ?>&page=<?php echo (int) ($recentHitsPage + 1); ?>">Next &raquo;</a>
 				<?php endif; ?>
 			</div>
 		<?php endif; ?>

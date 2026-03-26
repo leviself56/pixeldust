@@ -83,8 +83,14 @@ function render_simple_svg_chart(array $rows, string $valueKey = 'hits'): string
 	return $svg;
 }
 
+$sourceType = trim((string) ($_GET['source_type'] ?? 'pixel'));
+if (!in_array($sourceType, ['pixel', 'redirect'], true)) {
+	$sourceType = 'pixel';
+}
+
 $pixelKey = trim((string) ($_GET['pixel_key'] ?? ''));
-$pixelId = (int) ($_GET['pixel_id'] ?? 0);
+$redirectKey = trim((string) ($_GET['redirect_key'] ?? ''));
+$sourceKey = $sourceType === 'redirect' ? $redirectKey : $pixelKey;
 $period = (string) ($_GET['period'] ?? '7d');
 $validPeriods = ['24h', '7d', '30d'];
 if (!in_array($period, $validPeriods, true)) {
@@ -96,22 +102,35 @@ $cutoffUtc = (new DateTimeImmutable('now', new DateTimeZone('UTC')))
 	->sub(new DateInterval($periodIntervalSpec))
 	->format('Y-m-d H:i:s');
 
-$pixels = db()->query('SELECT id, pixel_key, total_hits FROM pd_pixels ORDER BY pixel_key ASC')->fetchAll();
-$selectedPixel = null;
+$hasRedirectTables = false;
+try {
+	$pdo = db();
+	$hasRedirectTables = table_exists($pdo, 'pd_redirect_links') && table_exists($pdo, 'pd_redirect_hits');
+} catch (Throwable $e) {
+	$hasRedirectTables = false;
+}
 
-if ($pixelId > 0) {
-	$stmt = db()->prepare('SELECT id, pixel_key, total_hits, created_at FROM pd_pixels WHERE id = :id LIMIT 1');
-	$stmt->execute(['id' => $pixelId]);
-	$selectedPixel = $stmt->fetch();
-	if ($selectedPixel) {
-		$pixelKey = (string) $selectedPixel['pixel_key'];
-	}
-} elseif ($pixelKey !== '') {
-	$stmt = db()->prepare('SELECT id, pixel_key, total_hits, created_at FROM pd_pixels WHERE pixel_key = :pixel_key LIMIT 1');
-	$stmt->execute(['pixel_key' => $pixelKey]);
-	$selectedPixel = $stmt->fetch();
-	if ($selectedPixel) {
-		$pixelId = (int) $selectedPixel['id'];
+if ($sourceType === 'redirect' && !$hasRedirectTables) {
+	$sourceType = 'pixel';
+	$sourceKey = $pixelKey;
+}
+
+$pixels = db()->query('SELECT id, pixel_key, total_hits FROM pd_pixels ORDER BY pixel_key ASC')->fetchAll();
+$redirects = [];
+if ($hasRedirectTables) {
+	$redirects = db()->query('SELECT id, redirect_key, total_hits FROM pd_redirect_links ORDER BY redirect_key ASC')->fetchAll();
+}
+$selectedSource = null;
+
+if ($sourceKey !== '') {
+	if ($sourceType === 'redirect') {
+		$stmt = db()->prepare('SELECT id, redirect_key AS source_key, total_hits, created_at FROM pd_redirect_links WHERE redirect_key = :source_key LIMIT 1');
+		$stmt->execute(['source_key' => $sourceKey]);
+		$selectedSource = $stmt->fetch();
+	} else {
+		$stmt = db()->prepare('SELECT id, pixel_key AS source_key, total_hits, created_at FROM pd_pixels WHERE pixel_key = :source_key LIMIT 1');
+		$stmt->execute(['source_key' => $sourceKey]);
+		$selectedSource = $stmt->fetch();
 	}
 }
 
@@ -130,25 +149,36 @@ $clientMix = [];
 $timelineRows = [];
 $topIps = [];
 
-if ($selectedPixel) {
-	if ($tableStatus['hit_classification']) {
+if ($selectedSource) {
+	if ($sourceType === 'redirect' && $tableStatus['redirect_hit_classification']) {
 		try {
-			backfill_hit_classification_for_pixel((int) $selectedPixel['id'], 80, true);
+			backfill_hit_classification_for_redirect((int) $selectedSource['id'], 80, true);
 		} catch (Throwable $e) {
 		}
 	}
+	if ($sourceType === 'pixel' && $tableStatus['hit_classification']) {
+		try {
+			backfill_hit_classification_for_pixel((int) $selectedSource['id'], 80, true);
+		} catch (Throwable $e) {
+		}
+	}
+
+	$hitTable = $sourceType === 'redirect' ? 'pd_redirect_hits' : 'pd_pixel_hits';
+	$idColumn = $sourceType === 'redirect' ? 'redirect_id' : 'pixel_id';
+	$classificationTable = $sourceType === 'redirect' ? 'pd_redirect_hit_classification' : 'pd_hit_classification';
+	$classificationAvailable = $sourceType === 'redirect' ? (bool) $tableStatus['redirect_hit_classification'] : (bool) $tableStatus['hit_classification'];
 
 	$referrerDomainExpr = "CASE WHEN h.referrer IS NULL OR TRIM(h.referrer)='' THEN '-' ELSE LOWER(SUBSTRING_INDEX(SUBSTRING_INDEX(TRIM(h.referrer),'://',-1),'/',1)) END";
 	$emailCaseExpr = "CASE WHEN h.user_agent LIKE '%GoogleImageProxy%' OR h.remote_host LIKE 'google-proxy-%' OR h.referrer LIKE '%mobile-webview.gmail.com%' OR h.referrer LIKE '%mail.google.com%' THEN 'gmail' WHEN h.user_agent LIKE 'YahooMailProxy%' OR h.remote_host LIKE 'ec%.ycpi.%yahoo.com' THEN 'yahoo_mail' WHEN h.referrer LIKE '%outlook.live.com%' OR h.user_agent LIKE '%OneOutlook/%' OR h.user_agent LIKE '%ms-office%' THEN 'outlook_family' WHEN h.referrer LIKE '%webmail.%' OR h.referrer LIKE '%mail.%' OR h.referrer LIKE '%neo.space%' OR h.referrer LIKE '%titan.email%' THEN 'other_webmail' ELSE 'unknown' END";
 	$ispFallbackExpr = "CASE WHEN h.remote_host IS NULL OR TRIM(h.remote_host)='' THEN 'unknown' WHEN h.remote_host REGEXP '^[0-9]+(\\\\.[0-9]+){3}$' THEN 'ip_unresolved' WHEN h.remote_host LIKE 'google-proxy-%' OR h.remote_host LIKE '%.google.com' THEN 'Google' WHEN h.remote_host LIKE '%.yahoo.com' AND h.remote_host LIKE '%.ycpi.%' THEN 'Yahoo' ELSE LOWER(SUBSTRING_INDEX(TRIM(h.remote_host),'.',-2)) END";
 
-	$joinClassification = $tableStatus['hit_classification'] ? ' LEFT JOIN pd_hit_classification c ON c.hit_id = h.id ' : '';
+	$joinClassification = $classificationAvailable ? " LEFT JOIN $classificationTable c ON c.hit_id = h.id " : '';
 	$joinEnrichment = $tableStatus['ip_enrichment'] ? ' LEFT JOIN pd_ip_enrichment e ON e.ip_address = h.ip_address ' : '';
-	$clientExpr = $tableStatus['hit_classification'] ? "COALESCE(NULLIF(c.email_client_guess,''), $emailCaseExpr)" : $emailCaseExpr;
-	$trafficExpr = $tableStatus['hit_classification'] ? "COALESCE(NULLIF(c.traffic_type,''), 'unknown')" : "CASE WHEN $clientExpr IN ('gmail','yahoo_mail') THEN 'proxy' ELSE 'unknown' END";
-	$ispExpr = $tableStatus['hit_classification'] && $tableStatus['ip_enrichment']
+	$clientExpr = $classificationAvailable ? "COALESCE(NULLIF(c.email_client_guess,''), $emailCaseExpr)" : $emailCaseExpr;
+	$trafficExpr = $classificationAvailable ? "COALESCE(NULLIF(c.traffic_type,''), 'unknown')" : "CASE WHEN $clientExpr IN ('gmail','yahoo_mail') THEN 'proxy' ELSE 'unknown' END";
+	$ispExpr = $classificationAvailable && $tableStatus['ip_enrichment']
 		? "COALESCE(NULLIF(c.isp_guess,''), NULLIF(e.isp_name,''), $ispFallbackExpr)"
-		: ($tableStatus['hit_classification']
+		: ($classificationAvailable
 			? "COALESCE(NULLIF(c.isp_guess,''), $ispFallbackExpr)"
 			: ($tableStatus['ip_enrichment'] ? "COALESCE(NULLIF(e.isp_name,''), $ispFallbackExpr)" : $ispFallbackExpr));
 
@@ -159,43 +189,43 @@ if ($selectedPixel) {
 			COUNT(DISTINCT $referrerDomainExpr) AS unique_referrers,
 			SUM(CASE WHEN $trafficExpr = 'proxy' THEN 1 ELSE 0 END) AS proxy_hits,
 			SUM(CASE WHEN $trafficExpr = 'human' THEN 1 ELSE 0 END) AS human_hits
-		 FROM pd_pixel_hits h
+		 FROM $hitTable h
 		 $joinClassification
 		 $joinEnrichment
-		 WHERE h.pixel_id = :pixel_id AND h.hit_at >= :cutoff_utc";
+		 WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc";
 	$summaryStmt = db()->prepare($summarySql);
 	$summaryStmt->execute([
-		'pixel_id' => (int) $selectedPixel['id'],
+		'source_id' => (int) $selectedSource['id'],
 		'cutoff_utc' => $cutoffUtc,
 	]);
 	$summary = array_merge($summary, (array) $summaryStmt->fetch());
 
 	$refSql =
 		"SELECT $referrerDomainExpr AS ref_domain, COUNT(*) AS hits
-		 FROM pd_pixel_hits h
-		 WHERE h.pixel_id = :pixel_id AND h.hit_at >= :cutoff_utc
+		 FROM $hitTable h
+		 WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc
 		 GROUP BY ref_domain
 		 ORDER BY hits DESC
 		 LIMIT 10";
 	$refStmt = db()->prepare($refSql);
 	$refStmt->execute([
-		'pixel_id' => (int) $selectedPixel['id'],
+		'source_id' => (int) $selectedSource['id'],
 		'cutoff_utc' => $cutoffUtc,
 	]);
 	$topReferrers = $refStmt->fetchAll();
 
 	$ispSql =
 		"SELECT $ispExpr AS isp, COUNT(*) AS hits, COUNT(DISTINCT h.ip_address) AS unique_ips
-		 FROM pd_pixel_hits h
+		 FROM $hitTable h
 		 $joinClassification
 		 $joinEnrichment
-		 WHERE h.pixel_id = :pixel_id AND h.hit_at >= :cutoff_utc
+		 WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc
 		 GROUP BY isp
 		 ORDER BY hits DESC
 		 LIMIT 10";
 	$ispStmt = db()->prepare($ispSql);
 	$ispStmt->execute([
-		'pixel_id' => (int) $selectedPixel['id'],
+		'source_id' => (int) $selectedSource['id'],
 		'cutoff_utc' => $cutoffUtc,
 	]);
 	$topIsps = $ispStmt->fetchAll();
@@ -203,15 +233,15 @@ if ($selectedPixel) {
 	if ($tableStatus['ip_enrichment']) {
 		$geoSql =
 			"SELECT COALESCE(NULLIF(e.country_code, ''), '??') AS country, COUNT(*) AS hits, COUNT(DISTINCT h.ip_address) AS unique_ips
-			 FROM pd_pixel_hits h
+			 FROM $hitTable h
 			 LEFT JOIN pd_ip_enrichment e ON e.ip_address = h.ip_address
-			 WHERE h.pixel_id = :pixel_id AND h.hit_at >= :cutoff_utc
+			 WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc
 			 GROUP BY country
 			 ORDER BY hits DESC
 			 LIMIT 10";
 		$geoStmt = db()->prepare($geoSql);
 		$geoStmt->execute([
-			'pixel_id' => (int) $selectedPixel['id'],
+			'source_id' => (int) $selectedSource['id'],
 			'cutoff_utc' => $cutoffUtc,
 		]);
 		$topCountries = $geoStmt->fetchAll();
@@ -219,14 +249,14 @@ if ($selectedPixel) {
 
 	$clientSql =
 		"SELECT $clientExpr AS client_name, COUNT(*) AS hits
-		 FROM pd_pixel_hits h
+		 FROM $hitTable h
 		 $joinClassification
-		 WHERE h.pixel_id = :pixel_id AND h.hit_at >= :cutoff_utc
+		 WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc
 		 GROUP BY client_name
 		 ORDER BY hits DESC";
 	$clientStmt = db()->prepare($clientSql);
 	$clientStmt->execute([
-		'pixel_id' => (int) $selectedPixel['id'],
+		'source_id' => (int) $selectedSource['id'],
 		'cutoff_utc' => $cutoffUtc,
 	]);
 	$clientMix = $clientStmt->fetchAll();
@@ -234,66 +264,90 @@ if ($selectedPixel) {
 	if ($period === '24h') {
 		$timelineSql =
 			"SELECT DATE_FORMAT(h.hit_at, '%Y-%m-%d %H:00:00') AS bucket, COUNT(*) AS hits
-			 FROM pd_pixel_hits h
-			 WHERE h.pixel_id = :pixel_id AND h.hit_at >= :cutoff_utc
+			 FROM $hitTable h
+			 WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc
 			 GROUP BY bucket
 			 ORDER BY bucket ASC";
 	} else {
 		$timelineSql =
 			"SELECT DATE(h.hit_at) AS bucket, COUNT(*) AS hits
-			 FROM pd_pixel_hits h
-			 WHERE h.pixel_id = :pixel_id AND h.hit_at >= :cutoff_utc
+			 FROM $hitTable h
+			 WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc
 			 GROUP BY bucket
 			 ORDER BY bucket ASC";
 	}
 	$timelineStmt = db()->prepare($timelineSql);
 	$timelineStmt->execute([
-		'pixel_id' => (int) $selectedPixel['id'],
+		'source_id' => (int) $selectedSource['id'],
 		'cutoff_utc' => $cutoffUtc,
 	]);
 	$timelineRows = $timelineStmt->fetchAll();
 
 	$ipSql =
 		"SELECT h.ip_address, COUNT(*) AS hits
-		 FROM pd_pixel_hits h
-		 WHERE h.pixel_id = :pixel_id AND h.hit_at >= :cutoff_utc
+		 FROM $hitTable h
+		 WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc
 		 GROUP BY h.ip_address
 		 ORDER BY hits DESC
 		 LIMIT 15";
 	$ipStmt = db()->prepare($ipSql);
 	$ipStmt->execute([
-		'pixel_id' => (int) $selectedPixel['id'],
+		'source_id' => (int) $selectedSource['id'],
 		'cutoff_utc' => $cutoffUtc,
 	]);
 	$topIps = $ipStmt->fetchAll();
 }
 
+$displayName = $sourceType === 'redirect' ? 'Redirect Analytics' : 'Pixel Analytics';
+
 render_header('Analytics');
 ?>
 <div class="spaced card">
 	<div>
-		<h1>Pixel Analytics</h1>
-		<p class="muted">Advanced analytics by pixel over selected time window.</p>
+		<h1><?php echo e($displayName); ?></h1>
+		<p class="muted">Advanced analytics by source over selected time window.</p>
 	</div>
 	<div class="inline">
 		<a class="nav-btn" href="index.php">Back to dashboard</a>
-		<a class="nav-btn" href="stats.php<?php echo $pixelKey !== '' ? '?pixel_key=' . urlencode($pixelKey) . '&period=' . urlencode($period) : ''; ?>">Open stats</a>
+		<a class="nav-btn" href="stats.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode($sourceKey) : '&pixel_key=' . urlencode($sourceKey); ?>&period=<?php echo urlencode($period); ?>">Open stats</a>
 		<a class="nav-btn logout" href="../logout.php">Logout</a>
 	</div>
 </div>
 
+<?php if (!$hasRedirectTables): ?>
+	<div class="error">Redirect analytics tables not migrated yet. Run <a href="../migrate.php">migrations</a> to enable redirect analytics.</div>
+<?php endif; ?>
+
 <div class="card">
 	<form method="get" class="row">
 		<div>
-			<label>Pixel ID</label>
-			<select name="pixel_key">
-				<option value="">Select pixel</option>
-				<?php foreach ($pixels as $pixel): ?>
-					<option value="<?php echo e((string) $pixel['pixel_key']); ?>" <?php echo $pixelKey === (string) $pixel['pixel_key'] ? 'selected' : ''; ?>>
-						<?php echo e((string) $pixel['pixel_key']); ?> (<?php echo e((string) $pixel['total_hits']); ?>)
-					</option>
-				<?php endforeach; ?>
+			<label>Source Type</label>
+			<select name="source_type">
+				<option value="pixel" <?php echo $sourceType === 'pixel' ? 'selected' : ''; ?>>Pixel</option>
+				<option value="redirect" <?php echo $sourceType === 'redirect' ? 'selected' : ''; ?>>Redirect URL</option>
 			</select>
+		</div>
+		<div>
+			<label><?php echo $sourceType === 'redirect' ? 'Redirect ID' : 'Pixel ID'; ?></label>
+			<?php if ($sourceType === 'redirect'): ?>
+				<select name="redirect_key">
+					<option value="">Select redirect</option>
+					<?php foreach ($redirects as $redirect): ?>
+						<option value="<?php echo e((string) $redirect['redirect_key']); ?>" <?php echo $sourceKey === (string) $redirect['redirect_key'] ? 'selected' : ''; ?>>
+							<?php echo e((string) $redirect['redirect_key']); ?> (<?php echo e((string) $redirect['total_hits']); ?>)
+						</option>
+					<?php endforeach; ?>
+				</select>
+			<?php else: ?>
+				<select name="pixel_key">
+					<option value="">Select pixel</option>
+					<?php foreach ($pixels as $pixel): ?>
+						<option value="<?php echo e((string) $pixel['pixel_key']); ?>" <?php echo $sourceKey === (string) $pixel['pixel_key'] ? 'selected' : ''; ?>>
+							<?php echo e((string) $pixel['pixel_key']); ?> (<?php echo e((string) $pixel['total_hits']); ?>)
+						</option>
+					<?php endforeach; ?>
+				</select>
+			<?php endif; ?>
 		</div>
 		<div>
 			<label>Period</label>
@@ -307,15 +361,15 @@ render_header('Analytics');
 	</form>
 </div>
 
-<?php if (!$tableStatus['hit_classification'] || !$tableStatus['ip_enrichment']): ?>
+<?php if (!$tableStatus['ip_enrichment']): ?>
 	<div class="error">Analytics enrichment tables are missing. Run <a href="../migrate.php">migrations</a> for full analytics data.</div>
 <?php endif; ?>
 
-<?php if ($pixelKey !== '' && !$selectedPixel): ?>
-	<div class="error">Pixel not found.</div>
+<?php if ($sourceKey !== '' && !$selectedSource): ?>
+	<div class="error"><?php echo e($sourceType === 'redirect' ? 'Redirect not found.' : 'Pixel not found.'); ?></div>
 <?php endif; ?>
 
-<?php if ($selectedPixel): ?>
+<?php if ($selectedSource): ?>
 	<div class="row">
 		<div class="card"><h3>Total Hits</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['total_hits'] ?? 0))); ?></p></div>
 		<div class="card"><h3>Unique IPs</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['unique_ips'] ?? 0))); ?></p></div>
@@ -339,10 +393,7 @@ render_header('Analytics');
 					<tr><td colspan="2" class="muted">No data.</td></tr>
 				<?php else: ?>
 					<?php foreach ($topReferrers as $row): ?>
-						<tr>
-							<td><?php echo e((string) ($row['ref_domain'] ?? '-')); ?></td>
-							<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
-						</tr>
+						<tr><td><?php echo e((string) ($row['ref_domain'] ?? '-')); ?></td><td><?php echo e((string) ($row['hits'] ?? 0)); ?></td></tr>
 					<?php endforeach; ?>
 				<?php endif; ?>
 				</tbody>
@@ -358,11 +409,7 @@ render_header('Analytics');
 					<tr><td colspan="3" class="muted">No data.</td></tr>
 				<?php else: ?>
 					<?php foreach ($topIsps as $row): ?>
-						<tr>
-							<td><?php echo e((string) ($row['isp'] ?? 'unknown')); ?></td>
-							<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
-							<td><?php echo e((string) ($row['unique_ips'] ?? 0)); ?></td>
-						</tr>
+						<tr><td><?php echo e((string) ($row['isp'] ?? 'unknown')); ?></td><td><?php echo e((string) ($row['hits'] ?? 0)); ?></td><td><?php echo e((string) ($row['unique_ips'] ?? 0)); ?></td></tr>
 					<?php endforeach; ?>
 				<?php endif; ?>
 				</tbody>
@@ -380,10 +427,7 @@ render_header('Analytics');
 					<tr><td colspan="2" class="muted">No data.</td></tr>
 				<?php else: ?>
 					<?php foreach ($clientMix as $row): ?>
-						<tr>
-							<td><?php echo e((string) ($row['client_name'] ?? 'unknown')); ?></td>
-							<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
-						</tr>
+						<tr><td><?php echo e((string) ($row['client_name'] ?? 'unknown')); ?></td><td><?php echo e((string) ($row['hits'] ?? 0)); ?></td></tr>
 					<?php endforeach; ?>
 				<?php endif; ?>
 				</tbody>
@@ -399,11 +443,7 @@ render_header('Analytics');
 					<tr><td colspan="3" class="muted">No geo data yet.</td></tr>
 				<?php else: ?>
 					<?php foreach ($topCountries as $row): ?>
-						<tr>
-							<td><?php echo e((string) ($row['country'] ?? '??')); ?></td>
-							<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
-							<td><?php echo e((string) ($row['unique_ips'] ?? 0)); ?></td>
-						</tr>
+						<tr><td><?php echo e((string) ($row['country'] ?? '??')); ?></td><td><?php echo e((string) ($row['hits'] ?? 0)); ?></td><td><?php echo e((string) ($row['unique_ips'] ?? 0)); ?></td></tr>
 					<?php endforeach; ?>
 				<?php endif; ?>
 				</tbody>
@@ -421,7 +461,7 @@ render_header('Analytics');
 			<?php else: ?>
 				<?php foreach ($topIps as $row): ?>
 					<tr>
-						<td><a href="ip-details.php?pixel_key=<?php echo urlencode((string) $selectedPixel['pixel_key']); ?>&ip=<?php echo urlencode((string) ($row['ip_address'] ?? '')); ?>&period=<?php echo urlencode($period); ?>"><?php echo e((string) ($row['ip_address'] ?? '')); ?></a></td>
+						<td><a href="ip-details.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode((string) $selectedSource['source_key']) : '&pixel_key=' . urlencode((string) $selectedSource['source_key']); ?>&ip=<?php echo urlencode((string) ($row['ip_address'] ?? '')); ?>&period=<?php echo urlencode($period); ?>"><?php echo e((string) ($row['ip_address'] ?? '')); ?></a></td>
 						<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
 					</tr>
 				<?php endforeach; ?>

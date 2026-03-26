@@ -193,6 +193,11 @@ function sanitize_pixel_key(string $pixelKey): string
 	return $pixelKey;
 }
 
+function sanitize_redirect_key(string $redirectKey): string
+{
+	return sanitize_pixel_key($redirectKey);
+}
+
 function create_pixel_if_missing(string $pixelKey, ?int $createdBy = null): int
 {
 	$pixelKey = sanitize_pixel_key($pixelKey);
@@ -304,6 +309,70 @@ function run_schema_migrations(PDO $pdo): array
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
 		);
 		$applied[] = 'Created table pd_pixel_hits';
+	}
+
+	if (!table_exists($pdo, 'pd_redirect_links')) {
+		$pdo->exec(
+			'CREATE TABLE pd_redirect_links (
+				id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+				redirect_key VARCHAR(191) NOT NULL UNIQUE,
+				destination_url TEXT NOT NULL,
+				is_active TINYINT(1) NOT NULL DEFAULT 1,
+				created_by INT UNSIGNED NULL,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				total_hits INT UNSIGNED NOT NULL DEFAULT 0,
+				INDEX idx_redirect_key (redirect_key),
+				INDEX idx_is_active (is_active)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+		);
+		$applied[] = 'Created table pd_redirect_links';
+	}
+
+	if (!table_exists($pdo, 'pd_redirect_hits')) {
+		$pdo->exec(
+			'CREATE TABLE pd_redirect_hits (
+				id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+				redirect_id INT UNSIGNED NOT NULL,
+				redirect_key VARCHAR(191) NOT NULL,
+				hit_at DATETIME NOT NULL,
+				ip_address VARCHAR(45) NOT NULL,
+				user_agent TEXT NULL,
+				referrer TEXT NULL,
+				request_uri TEXT NULL,
+				query_string TEXT NULL,
+				accept_language VARCHAR(255) NULL,
+				remote_host VARCHAR(255) NULL,
+				trigger_id_used VARCHAR(191) NULL,
+				destination_url_at_hit TEXT NULL,
+				INDEX idx_redirect_id (redirect_id),
+				INDEX idx_redirect_key (redirect_key),
+				INDEX idx_hit_at (hit_at)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+		);
+		$applied[] = 'Created table pd_redirect_hits';
+	}
+
+	if (!table_exists($pdo, 'pd_redirect_hit_classification')) {
+		$pdo->exec(
+			'CREATE TABLE pd_redirect_hit_classification (
+				hit_id BIGINT UNSIGNED PRIMARY KEY,
+				redirect_id INT UNSIGNED NOT NULL,
+				redirect_key VARCHAR(191) NOT NULL,
+				ip_address VARCHAR(45) NOT NULL,
+				email_client_guess VARCHAR(50) NOT NULL DEFAULT "unknown",
+				email_client_confidence DECIMAL(4,3) NOT NULL DEFAULT 0.000,
+				traffic_type VARCHAR(30) NOT NULL DEFAULT "unknown",
+				isp_guess VARCHAR(255) NULL,
+				isp_source VARCHAR(30) NOT NULL DEFAULT "unknown",
+				classified_at DATETIME NOT NULL,
+				INDEX idx_redirect_time (redirect_id, classified_at),
+				INDEX idx_redirect_ip (redirect_id, ip_address),
+				INDEX idx_email_client (email_client_guess),
+				INDEX idx_traffic_type (traffic_type)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+		);
+		$applied[] = 'Created table pd_redirect_hit_classification';
 	}
 
 	if (!table_exists($pdo, 'pd_trigger_actions')) {
@@ -438,6 +507,45 @@ function run_schema_migrations(PDO $pdo): array
 		}
 	}
 
+	$redirectLinkColumns = [
+		'redirect_key' => 'ALTER TABLE pd_redirect_links ADD COLUMN redirect_key VARCHAR(191) NOT NULL AFTER id',
+		'destination_url' => 'ALTER TABLE pd_redirect_links ADD COLUMN destination_url TEXT NOT NULL AFTER redirect_key',
+		'is_active' => 'ALTER TABLE pd_redirect_links ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER destination_url',
+		'created_by' => 'ALTER TABLE pd_redirect_links ADD COLUMN created_by INT UNSIGNED NULL AFTER is_active',
+		'created_at' => 'ALTER TABLE pd_redirect_links ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER created_by',
+		'updated_at' => 'ALTER TABLE pd_redirect_links ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER created_at',
+		'total_hits' => 'ALTER TABLE pd_redirect_links ADD COLUMN total_hits INT UNSIGNED NOT NULL DEFAULT 0 AFTER updated_at',
+	];
+
+	foreach ($redirectLinkColumns as $column => $sql) {
+		if (!column_exists($pdo, 'pd_redirect_links', $column)) {
+			$pdo->exec($sql);
+			$applied[] = 'Added column pd_redirect_links.' . $column;
+		}
+	}
+
+	$redirectHitColumns = [
+		'redirect_id' => 'ALTER TABLE pd_redirect_hits ADD COLUMN redirect_id INT UNSIGNED NOT NULL AFTER id',
+		'redirect_key' => 'ALTER TABLE pd_redirect_hits ADD COLUMN redirect_key VARCHAR(191) NOT NULL AFTER redirect_id',
+		'hit_at' => 'ALTER TABLE pd_redirect_hits ADD COLUMN hit_at DATETIME NOT NULL AFTER redirect_key',
+		'ip_address' => 'ALTER TABLE pd_redirect_hits ADD COLUMN ip_address VARCHAR(45) NOT NULL AFTER hit_at',
+		'user_agent' => 'ALTER TABLE pd_redirect_hits ADD COLUMN user_agent TEXT NULL AFTER ip_address',
+		'referrer' => 'ALTER TABLE pd_redirect_hits ADD COLUMN referrer TEXT NULL AFTER user_agent',
+		'request_uri' => 'ALTER TABLE pd_redirect_hits ADD COLUMN request_uri TEXT NULL AFTER referrer',
+		'query_string' => 'ALTER TABLE pd_redirect_hits ADD COLUMN query_string TEXT NULL AFTER request_uri',
+		'accept_language' => 'ALTER TABLE pd_redirect_hits ADD COLUMN accept_language VARCHAR(255) NULL AFTER query_string',
+		'remote_host' => 'ALTER TABLE pd_redirect_hits ADD COLUMN remote_host VARCHAR(255) NULL AFTER accept_language',
+		'trigger_id_used' => 'ALTER TABLE pd_redirect_hits ADD COLUMN trigger_id_used VARCHAR(191) NULL AFTER remote_host',
+		'destination_url_at_hit' => 'ALTER TABLE pd_redirect_hits ADD COLUMN destination_url_at_hit TEXT NULL AFTER trigger_id_used',
+	];
+
+	foreach ($redirectHitColumns as $column => $sql) {
+		if (!column_exists($pdo, 'pd_redirect_hits', $column)) {
+			$pdo->exec($sql);
+			$applied[] = 'Added column pd_redirect_hits.' . $column;
+		}
+	}
+
 	$adminColumns = [
 		'last_login_at' => 'ALTER TABLE pd_admin_users ADD COLUMN last_login_at DATETIME NULL AFTER created_at',
 	];
@@ -523,6 +631,25 @@ function run_schema_migrations(PDO $pdo): array
 		}
 	}
 
+	$redirectClassificationColumns = [
+		'redirect_id' => 'ALTER TABLE pd_redirect_hit_classification ADD COLUMN redirect_id INT UNSIGNED NOT NULL AFTER hit_id',
+		'redirect_key' => 'ALTER TABLE pd_redirect_hit_classification ADD COLUMN redirect_key VARCHAR(191) NOT NULL AFTER redirect_id',
+		'ip_address' => 'ALTER TABLE pd_redirect_hit_classification ADD COLUMN ip_address VARCHAR(45) NOT NULL AFTER redirect_key',
+		'email_client_guess' => 'ALTER TABLE pd_redirect_hit_classification ADD COLUMN email_client_guess VARCHAR(50) NOT NULL DEFAULT "unknown" AFTER ip_address',
+		'email_client_confidence' => 'ALTER TABLE pd_redirect_hit_classification ADD COLUMN email_client_confidence DECIMAL(4,3) NOT NULL DEFAULT 0.000 AFTER email_client_guess',
+		'traffic_type' => 'ALTER TABLE pd_redirect_hit_classification ADD COLUMN traffic_type VARCHAR(30) NOT NULL DEFAULT "unknown" AFTER email_client_confidence',
+		'isp_guess' => 'ALTER TABLE pd_redirect_hit_classification ADD COLUMN isp_guess VARCHAR(255) NULL AFTER traffic_type',
+		'isp_source' => 'ALTER TABLE pd_redirect_hit_classification ADD COLUMN isp_source VARCHAR(30) NOT NULL DEFAULT "unknown" AFTER isp_guess',
+		'classified_at' => 'ALTER TABLE pd_redirect_hit_classification ADD COLUMN classified_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER isp_source',
+	];
+
+	foreach ($redirectClassificationColumns as $column => $sql) {
+		if (!column_exists($pdo, 'pd_redirect_hit_classification', $column)) {
+			$pdo->exec($sql);
+			$applied[] = 'Added column pd_redirect_hit_classification.' . $column;
+		}
+	}
+
 	$queueColumns = [
 		'first_seen_at' => 'ALTER TABLE pd_ip_enrichment_queue ADD COLUMN first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER ip_address',
 		'last_seen_at' => 'ALTER TABLE pd_ip_enrichment_queue ADD COLUMN last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER first_seen_at',
@@ -563,6 +690,17 @@ function run_schema_migrations(PDO $pdo): array
 		['table' => 'pd_hit_classification', 'name' => 'idx_pixel_ip', 'sql' => 'CREATE INDEX idx_pixel_ip ON pd_hit_classification (pixel_id, ip_address)'],
 		['table' => 'pd_hit_classification', 'name' => 'idx_email_client', 'sql' => 'CREATE INDEX idx_email_client ON pd_hit_classification (email_client_guess)'],
 		['table' => 'pd_hit_classification', 'name' => 'idx_traffic_type', 'sql' => 'CREATE INDEX idx_traffic_type ON pd_hit_classification (traffic_type)'],
+		['table' => 'pd_redirect_links', 'name' => 'idx_redirect_key', 'sql' => 'CREATE INDEX idx_redirect_key ON pd_redirect_links (redirect_key)'],
+		['table' => 'pd_redirect_links', 'name' => 'idx_is_active', 'sql' => 'CREATE INDEX idx_is_active ON pd_redirect_links (is_active)'],
+		['table' => 'pd_redirect_hits', 'name' => 'idx_redirect_id', 'sql' => 'CREATE INDEX idx_redirect_id ON pd_redirect_hits (redirect_id)'],
+		['table' => 'pd_redirect_hits', 'name' => 'idx_redirect_key', 'sql' => 'CREATE INDEX idx_redirect_key ON pd_redirect_hits (redirect_key)'],
+		['table' => 'pd_redirect_hits', 'name' => 'idx_hit_at', 'sql' => 'CREATE INDEX idx_hit_at ON pd_redirect_hits (hit_at)'],
+		['table' => 'pd_redirect_hits', 'name' => 'idx_redirect_time', 'sql' => 'CREATE INDEX idx_redirect_time ON pd_redirect_hits (redirect_id, hit_at)'],
+		['table' => 'pd_redirect_hits', 'name' => 'idx_redirect_ip_time', 'sql' => 'CREATE INDEX idx_redirect_ip_time ON pd_redirect_hits (redirect_id, ip_address, hit_at)'],
+		['table' => 'pd_redirect_hit_classification', 'name' => 'idx_redirect_time', 'sql' => 'CREATE INDEX idx_redirect_time ON pd_redirect_hit_classification (redirect_id, classified_at)'],
+		['table' => 'pd_redirect_hit_classification', 'name' => 'idx_redirect_ip', 'sql' => 'CREATE INDEX idx_redirect_ip ON pd_redirect_hit_classification (redirect_id, ip_address)'],
+		['table' => 'pd_redirect_hit_classification', 'name' => 'idx_email_client', 'sql' => 'CREATE INDEX idx_email_client ON pd_redirect_hit_classification (email_client_guess)'],
+		['table' => 'pd_redirect_hit_classification', 'name' => 'idx_traffic_type', 'sql' => 'CREATE INDEX idx_traffic_type ON pd_redirect_hit_classification (traffic_type)'],
 		['table' => 'pd_ip_enrichment_queue', 'name' => 'idx_next_attempt', 'sql' => 'CREATE INDEX idx_next_attempt ON pd_ip_enrichment_queue (next_attempt_at)'],
 		['table' => 'pd_ip_enrichment_queue', 'name' => 'idx_last_seen', 'sql' => 'CREATE INDEX idx_last_seen ON pd_ip_enrichment_queue (last_seen_at)'],
 	];
@@ -590,12 +728,14 @@ function analytics_table_status(): array
 		$status = [
 			'ip_enrichment' => table_exists($pdo, 'pd_ip_enrichment'),
 			'hit_classification' => table_exists($pdo, 'pd_hit_classification'),
+			'redirect_hit_classification' => table_exists($pdo, 'pd_redirect_hit_classification'),
 			'ip_queue' => table_exists($pdo, 'pd_ip_enrichment_queue'),
 		];
 	} catch (Throwable $e) {
 		$status = [
 			'ip_enrichment' => false,
 			'hit_classification' => false,
+			'redirect_hit_classification' => false,
 			'ip_queue' => false,
 		];
 	}
@@ -998,6 +1138,153 @@ function backfill_hit_classification_for_pixel(int $pixelId, int $limit = 100, b
 				(int) $row['id'],
 				(int) $row['pixel_id'],
 				(string) $row['pixel_key'],
+				[
+					'ip_address' => (string) ($row['ip_address'] ?? ''),
+					'user_agent' => (string) ($row['user_agent'] ?? ''),
+					'referrer' => (string) ($row['referrer'] ?? ''),
+					'request_uri' => (string) ($row['request_uri'] ?? ''),
+					'accept_language' => (string) ($row['accept_language'] ?? ''),
+					'remote_host' => (string) ($row['remote_host'] ?? ''),
+				],
+				$allowRemoteLookup
+			);
+		} catch (Throwable $e) {
+		}
+	}
+
+	return count($rows);
+}
+
+function create_redirect_link(string $redirectKey, string $destinationUrl, ?int $createdBy = null): int
+{
+	$redirectKey = sanitize_redirect_key($redirectKey);
+	if ($redirectKey === '') {
+		throw new InvalidArgumentException('Redirect key is required.');
+	}
+
+	$destinationUrl = trim($destinationUrl);
+	if ($destinationUrl === '' || !filter_var($destinationUrl, FILTER_VALIDATE_URL)) {
+		throw new InvalidArgumentException('Destination URL must be a valid URL.');
+	}
+
+	$scheme = strtolower((string) parse_url($destinationUrl, PHP_URL_SCHEME));
+	if (!in_array($scheme, ['http', 'https'], true)) {
+		throw new InvalidArgumentException('Destination URL must be http or https.');
+	}
+
+	$stmt = db()->prepare('SELECT id FROM pd_redirect_links WHERE redirect_key = :redirect_key LIMIT 1');
+	$stmt->execute(['redirect_key' => $redirectKey]);
+	$existing = $stmt->fetch();
+	if ($existing) {
+		throw new RuntimeException('Redirect key already exists.');
+	}
+
+	$insert = db()->prepare(
+		'INSERT INTO pd_redirect_links (redirect_key, destination_url, is_active, created_by, created_at, updated_at, total_hits)
+		 VALUES (:redirect_key, :destination_url, 1, :created_by, NOW(), NOW(), 0)'
+	);
+	$insert->execute([
+		'redirect_key' => $redirectKey,
+		'destination_url' => $destinationUrl,
+		'created_by' => $createdBy,
+	]);
+
+	return (int) db()->lastInsertId();
+}
+
+function classify_and_store_redirect_hit(int $hitId, int $redirectId, string $redirectKey, array $hitData, bool $allowRemoteLookup = false): void
+{
+	$status = analytics_table_status();
+	if (!$status['redirect_hit_classification']) {
+		return;
+	}
+
+	$ipAddress = trim((string) ($hitData['ip_address'] ?? ''));
+	$enrichment = $ipAddress !== '' ? ensure_ip_enrichment($ipAddress, $allowRemoteLookup) : [
+		'is_proxy' => 0,
+		'isp_name' => null,
+	];
+
+	$email = infer_email_client($hitData);
+	$remoteHostIsp = infer_isp_from_remote_host((string) ($hitData['remote_host'] ?? ''));
+	$asnIsp = trim((string) ($enrichment['asn_org'] ?? ''));
+	$ispName = trim((string) ($enrichment['isp_name'] ?? ''));
+
+	$ispGuess = null;
+	$ispSource = 'unknown';
+	if ($remoteHostIsp !== null && $remoteHostIsp !== '') {
+		$ispGuess = $remoteHostIsp;
+		$ispSource = 'remote_host';
+	} elseif ($ispName !== '') {
+		$ispGuess = $ispName;
+		$ispSource = 'geo_isp';
+	} elseif ($asnIsp !== '') {
+		$ispGuess = $asnIsp;
+		$ispSource = 'asn';
+	}
+
+	$trafficType = infer_traffic_type($hitData, $enrichment, (string) $email['client']);
+
+	$stmt = db()->prepare(
+		'INSERT INTO pd_redirect_hit_classification (
+			hit_id, redirect_id, redirect_key, ip_address, email_client_guess, email_client_confidence,
+			traffic_type, isp_guess, isp_source, classified_at
+		) VALUES (
+			:hit_id, :redirect_id, :redirect_key, :ip_address, :email_client_guess, :email_client_confidence,
+			:traffic_type, :isp_guess, :isp_source, NOW()
+		)
+		ON DUPLICATE KEY UPDATE
+			redirect_id = VALUES(redirect_id),
+			redirect_key = VALUES(redirect_key),
+			ip_address = VALUES(ip_address),
+			email_client_guess = VALUES(email_client_guess),
+			email_client_confidence = VALUES(email_client_confidence),
+			traffic_type = VALUES(traffic_type),
+			isp_guess = VALUES(isp_guess),
+			isp_source = VALUES(isp_source),
+			classified_at = NOW()'
+	);
+
+	$stmt->execute([
+		'hit_id' => $hitId,
+		'redirect_id' => $redirectId,
+		'redirect_key' => $redirectKey,
+		'ip_address' => $ipAddress,
+		'email_client_guess' => (string) $email['client'],
+		'email_client_confidence' => (float) $email['confidence'],
+		'traffic_type' => $trafficType,
+		'isp_guess' => $ispGuess,
+		'isp_source' => $ispSource,
+	]);
+}
+
+function backfill_hit_classification_for_redirect(int $redirectId, int $limit = 100, bool $allowRemoteLookup = false): int
+{
+	$status = analytics_table_status();
+	if (!$status['redirect_hit_classification']) {
+		return 0;
+	}
+
+	$limit = max(1, min(500, $limit));
+	$stmt = db()->prepare(
+		'SELECT h.id, h.redirect_id, h.redirect_key, h.ip_address, h.user_agent, h.referrer, h.request_uri, h.accept_language, h.remote_host
+		 FROM pd_redirect_hits h
+		 LEFT JOIN pd_redirect_hit_classification c ON c.hit_id = h.id
+		 WHERE h.redirect_id = :redirect_id AND c.hit_id IS NULL
+		 ORDER BY h.id DESC
+		 LIMIT :limit'
+	);
+	$stmt->bindValue(':redirect_id', $redirectId, PDO::PARAM_INT);
+	$stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+	$stmt->execute();
+
+	$rows = $stmt->fetchAll();
+	foreach ($rows as $row) {
+		try {
+			classify_and_store_redirect_hit(
+				(int) $row['id'],
+				(int) $row['redirect_id'],
+				(string) $row['redirect_key'],
 				[
 					'ip_address' => (string) ($row['ip_address'] ?? ''),
 					'user_agent' => (string) ($row['user_agent'] ?? ''),
