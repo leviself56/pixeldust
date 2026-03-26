@@ -39,6 +39,12 @@ $pixelKey = trim((string) ($_GET['pixel_key'] ?? ''));
 $redirectKey = trim((string) ($_GET['redirect_key'] ?? ''));
 $sourceKey = $sourceType === 'redirect' ? $redirectKey : $pixelKey;
 $period = (string) ($_GET['period'] ?? '7d');
+$search = trim((string) ($_GET['search'] ?? ''));
+if (function_exists('mb_strlen') && mb_strlen($search) > 255) {
+	$search = (string) mb_substr($search, 0, 255);
+} elseif (strlen($search) > 255) {
+	$search = substr($search, 0, 255);
+}
 $validPeriods = ['24h', '7d', '30d'];
 if (!in_array($period, $validPeriods, true)) {
 	$period = '7d';
@@ -124,7 +130,17 @@ if ($selectedSource) {
 	}
 
 	$totalStmt = db()->prepare("SELECT COUNT(*) AS total FROM $hitTable WHERE $idColumn = :source_id");
-	$totalStmt->execute(['source_id' => (int) $selectedSource['id']]);
+	$searchWhereSql = '';
+	if ($search !== '') {
+		$searchWhereSql = ' AND (hit_at LIKE :search_like OR ip_address LIKE :search_like OR referrer LIKE :search_like OR user_agent LIKE :search_like OR accept_language LIKE :search_like OR remote_host LIKE :search_like)';
+	}
+
+	$totalStmt = db()->prepare("SELECT COUNT(*) AS total FROM $hitTable WHERE $idColumn = :source_id$searchWhereSql");
+	$totalStmt->bindValue(':source_id', (int) $selectedSource['id'], PDO::PARAM_INT);
+	if ($search !== '') {
+		$totalStmt->bindValue(':search_like', '%' . $search . '%', PDO::PARAM_STR);
+	}
+	$totalStmt->execute();
 	$recentHitsTotal = (int) ($totalStmt->fetch()['total'] ?? 0);
 	$recentHitsTotalPages = max(1, (int) ceil($recentHitsTotal / $recentHitsPerPage));
 	if ($recentHitsPage > $recentHitsTotalPages) {
@@ -135,11 +151,14 @@ if ($selectedSource) {
 	$recentStmt = db()->prepare(
 		"SELECT hit_at, ip_address, user_agent, referrer, accept_language, remote_host
 		 FROM $hitTable
-		 WHERE $idColumn = :source_id
+		 WHERE $idColumn = :source_id$searchWhereSql
 		 ORDER BY hit_at DESC
 		 LIMIT :offset, :limit"
 	);
 	$recentStmt->bindValue(':source_id', (int) $selectedSource['id'], PDO::PARAM_INT);
+	if ($search !== '') {
+		$recentStmt->bindValue(':search_like', '%' . $search . '%', PDO::PARAM_STR);
+	}
 	$recentStmt->bindValue(':offset', $recentHitsOffset, PDO::PARAM_INT);
 	$recentStmt->bindValue(':limit', $recentHitsPerPage, PDO::PARAM_INT);
 	$recentStmt->execute();
@@ -281,6 +300,24 @@ render_header('Stats');
 		<p class="muted">Showing <?php echo e((string) ($recentHitsTotal === 0 ? 0 : (($recentHitsPage - 1) * $recentHitsPerPage + 1))); ?>-
 			<?php echo e((string) min($recentHitsPage * $recentHitsPerPage, $recentHitsTotal)); ?> of
 			<?php echo e((string) $recentHitsTotal); ?></p>
+		<div style="margin:10px 0 12px;max-width:520px;">
+			<label for="recent-hits-search">Search Recent Hits</label>
+			<form method="get" id="recent-hits-search-form">
+				<input type="hidden" name="source_type" value="<?php echo e($sourceType); ?>">
+				<?php if ($sourceType === 'redirect'): ?>
+					<input type="hidden" name="redirect_key" value="<?php echo e((string) $selectedSource['source_key']); ?>">
+				<?php else: ?>
+					<input type="hidden" name="pixel_key" value="<?php echo e((string) $selectedSource['source_key']); ?>">
+				<?php endif; ?>
+				<input type="hidden" name="period" value="<?php echo e($period); ?>">
+				<div class="inline" style="gap:8px;align-items:center;flex-wrap:nowrap;">
+					<input type="text" name="search" id="recent-hits-search" value="<?php echo e($search); ?>" placeholder="Search Date/Time, IP, Referrer, User Agent, Language, or Host" style="flex:1 1 auto;min-width:0;">
+					<?php if ($search !== ''): ?>
+						<button type="button" style="white-space:nowrap;" onclick="window.location.href='stats.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode((string) $selectedSource['source_key']) : '&pixel_key=' . urlencode((string) $selectedSource['source_key']); ?>&period=<?php echo urlencode($period); ?>';">Clear Search</button>
+					<?php endif; ?>
+				</div>
+			</form>
+		</div>
 		<div style="width:100%;overflow-x:auto;">
 		<table style="min-width:100%;table-layout:fixed;">
 			<thead>
@@ -321,15 +358,59 @@ render_header('Stats');
 		<?php if ($recentHitsTotalPages > 1): ?>
 			<div class="inline" style="margin-top:12px;">
 				<?php if ($recentHitsPage > 1): ?>
-					<a href="stats.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode((string) $selectedSource['source_key']) : '&pixel_key=' . urlencode((string) $selectedSource['source_key']); ?>&period=<?php echo urlencode($period); ?>&page=<?php echo (int) ($recentHitsPage - 1); ?>">&laquo; Prev</a>
+					<a href="stats.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode((string) $selectedSource['source_key']) : '&pixel_key=' . urlencode((string) $selectedSource['source_key']); ?>&period=<?php echo urlencode($period); ?><?php echo $search !== '' ? '&search=' . urlencode($search) : ''; ?>&page=<?php echo (int) ($recentHitsPage - 1); ?>">&laquo; Prev</a>
 				<?php endif; ?>
 				<span class="muted">Page <?php echo e((string) $recentHitsPage); ?> of <?php echo e((string) $recentHitsTotalPages); ?></span>
 				<?php if ($recentHitsPage < $recentHitsTotalPages): ?>
-					<a href="stats.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode((string) $selectedSource['source_key']) : '&pixel_key=' . urlencode((string) $selectedSource['source_key']); ?>&period=<?php echo urlencode($period); ?>&page=<?php echo (int) ($recentHitsPage + 1); ?>">Next &raquo;</a>
+					<a href="stats.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode((string) $selectedSource['source_key']) : '&pixel_key=' . urlencode((string) $selectedSource['source_key']); ?>&period=<?php echo urlencode($period); ?><?php echo $search !== '' ? '&search=' . urlencode($search) : ''; ?>&page=<?php echo (int) ($recentHitsPage + 1); ?>">Next &raquo;</a>
 				<?php endif; ?>
 			</div>
 		<?php endif; ?>
 	</div>
 <?php endif; ?>
+<script>
+var recentHitsSearchInput = document.getElementById('recent-hits-search');
+var recentHitsSearchForm = document.getElementById('recent-hits-search-form');
+if (recentHitsSearchInput && recentHitsSearchForm) {
+	var recentHitsSearchTimer = null;
+	var recentHitsShouldRefocus = false;
+	try {
+		recentHitsShouldRefocus = window.sessionStorage.getItem('recentHitsRefocus') === '1';
+		if (recentHitsShouldRefocus) {
+			window.sessionStorage.removeItem('recentHitsRefocus');
+		}
+	} catch (e) {
+		recentHitsShouldRefocus = false;
+	}
+
+	if (recentHitsShouldRefocus || (recentHitsSearchInput.value || '').trim() !== '') {
+		setTimeout(function () {
+			recentHitsSearchInput.focus();
+			var valueLength = recentHitsSearchInput.value.length;
+			if (recentHitsSearchInput.setSelectionRange) {
+				recentHitsSearchInput.setSelectionRange(valueLength, valueLength);
+			}
+		}, 0);
+	}
+
+	var submitSearch = function () {
+		try {
+			window.sessionStorage.setItem('recentHitsRefocus', '1');
+		} catch (e) {
+		}
+		recentHitsSearchForm.submit();
+	};
+
+	recentHitsSearchInput.addEventListener('input', function () {
+		clearTimeout(recentHitsSearchTimer);
+		recentHitsSearchTimer = setTimeout(submitSearch, 900);
+	});
+
+	recentHitsSearchInput.addEventListener('paste', function () {
+		clearTimeout(recentHitsSearchTimer);
+		recentHitsSearchTimer = setTimeout(submitSearch, 0);
+	});
+}
+</script>
 <?php
 render_footer();
