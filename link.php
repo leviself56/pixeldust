@@ -4,6 +4,26 @@ declare(strict_types=1);
 
 require __DIR__ . '/_libraries/core.php';
 
+function normalize_ref_fallback(string $value): string {
+	$value = trim($value);
+	if ($value === '') {
+		return '';
+	}
+
+	if (filter_var($value, FILTER_VALIDATE_URL)) {
+		return $value;
+	}
+
+	if (preg_match('/^[a-z0-9.-]+\.[a-z]{2,}(?:\/.*)?$/i', $value) === 1) {
+		$asUrl = 'https://' . ltrim($value, '/');
+		if (filter_var($asUrl, FILTER_VALIDATE_URL)) {
+			return $asUrl;
+		}
+	}
+
+	return substr($value, 0, 255);
+}
+
 if (!is_installed()) {
 	http_response_code(503);
 	header('Content-Type: text/plain; charset=utf-8');
@@ -66,7 +86,10 @@ if (!in_array($scheme, ['http', 'https'], true)) {
 
 $ipAddress = substr((string) ($_SERVER['REMOTE_ADDR'] ?? ''), 0, 45);
 $userAgent = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');
-$referrer = (string) ($_SERVER['HTTP_REFERER'] ?? '');
+$referrer = trim((string) ($_SERVER['HTTP_REFERER'] ?? ''));
+if ($referrer === '') {
+	$referrer = normalize_ref_fallback((string) ($_GET['ref'] ?? ''));
+}
 $requestUri = (string) ($_SERVER['REQUEST_URI'] ?? '');
 $queryString = (string) ($_SERVER['QUERY_STRING'] ?? '');
 $acceptLanguage = substr((string) ($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? ''), 0, 255);
