@@ -192,7 +192,8 @@ render_header('Admin Dashboard');
 		}
 		?>		
 	<?php endif; ?>
-	<table>
+	<div style="width:100%;overflow-x:auto;">
+	<table style="min-width:100%;table-layout:fixed;">
 		<thead>
 			<tr>
 				<th>ID</th>
@@ -215,14 +216,11 @@ render_header('Admin Dashboard');
 						}
 						?>
 					<tr class="pixel-row" data-pixel-key="<?php echo e((string) $pixel['pixel_key']); ?>">
-						<td><?php echo e((string) $pixel['pixel_key']); ?></td>
-						<td><?php echo e((string) $pixel['total_hits']); ?></td>
-						<td><?php echo e(format_db_datetime((string) ($pixel['last_hit_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
+						<td style="word-break:break-word;"><?php echo e((string) $pixel['pixel_key']); ?></td>
+						<td style="word-break:break-word;"><?php echo e((string) $pixel['total_hits']); ?></td>
+						<td style="word-break:break-word;"><?php echo e(format_db_datetime((string) ($pixel['last_hit_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
 						<td>
-							<span class="inline" style="display:flex;align-items:center;gap:8px;">
-								<input id="embed-url-<?php echo (int) $pixel['id']; ?>" value="<?php echo e($embed); ?>" readonly onclick="this.select()" style="flex:1;min-width:220px;width:auto;">
-								<button type="button" onclick="copyToClipboard('embed-url-<?php echo (int) $pixel['id']; ?>', this)">Copy Link</button>
-							</span>
+							<button type="button" onclick='copyTextValue(<?php echo json_encode($embed, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT); ?>, this)'>Copy Embed Link</button>
 						</td>
 						<td><a class="nav-btn" href="stats.php?pixel_key=<?php echo urlencode((string) $pixel['pixel_key']); ?>">Open</a></td>
 						<td><a class="nav-btn" href="analytics.php?pixel_key=<?php echo urlencode((string) $pixel['pixel_key']); ?>">Open</a></td>
@@ -231,6 +229,7 @@ render_header('Admin Dashboard');
 			<?php endif; ?>
 		</tbody>
 	</table>
+	</div>
 </div>
 <script>
 function sanitizePixelKeyValue(value) {
@@ -272,6 +271,45 @@ function copyToClipboard(inputId, buttonEl) {
 	} catch (e) {
 		document.execCommand('copy');
 	}
+}
+
+function copyTextValue(textValue, buttonEl) {
+	var text = (textValue || '').toString();
+	if (!text) {
+		return;
+	}
+
+	var originalText = buttonEl.textContent;
+	var copied = false;
+
+	if (navigator.clipboard && window.isSecureContext) {
+		navigator.clipboard.writeText(text).then(function () {
+			buttonEl.textContent = 'Copied!';
+			setTimeout(function () { buttonEl.textContent = originalText; }, 1200);
+		}).catch(function () {
+			buttonEl.textContent = 'Copy failed';
+			setTimeout(function () { buttonEl.textContent = originalText; }, 1200);
+		});
+		return;
+	}
+
+	var tempInput = document.createElement('input');
+	tempInput.type = 'text';
+	tempInput.value = text;
+	tempInput.style.position = 'fixed';
+	tempInput.style.opacity = '0';
+	document.body.appendChild(tempInput);
+	tempInput.focus();
+	tempInput.select();
+	try {
+		copied = document.execCommand('copy');
+	} catch (e) {
+		copied = false;
+	}
+	document.body.removeChild(tempInput);
+
+	buttonEl.textContent = copied ? 'Copied!' : 'Copy failed';
+	setTimeout(function () { buttonEl.textContent = originalText; }, 1200);
 }
 
 var pixelKeyInput = document.getElementById('pixel_key');
