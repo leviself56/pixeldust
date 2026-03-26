@@ -1,0 +1,459 @@
+<?php
+
+declare(strict_types=1);
+
+require __DIR__ . '/../_libraries/core.php';
+
+if (!is_installed()) {
+	redirect('../install.php');
+}
+
+$token = trim((string) ($_GET['token'] ?? ''));
+if ($token !== '' && !current_admin()) {
+	$decoded = base64_decode($token, true);
+	if ($decoded !== false && strpos($decoded, ':') !== false) {
+		[$username, $password] = explode(':', $decoded, 2);
+		$username = trim((string) $username);
+		$password = (string) $password;
+
+		if ($username !== '' && $password !== '') {
+			$stmt = db()->prepare('SELECT id, password_hash FROM pd_admin_users WHERE username = :username LIMIT 1');
+			$stmt->execute(['username' => $username]);
+			$adminByToken = $stmt->fetch();
+
+			if ($adminByToken && password_verify($password, (string) $adminByToken['password_hash'])) {
+				$_SESSION['admin_user_id'] = (int) $adminByToken['id'];
+			}
+		}
+	}
+}
+
+require_admin();
+
+$pixelKey = trim((string) ($_GET['pixel_key'] ?? ''));
+$pixelId = (int) ($_GET['pixel_id'] ?? 0);
+$ipAddress = trim((string) ($_GET['ip'] ?? ''));
+$period = (string) ($_GET['period'] ?? '7d');
+$validPeriods = ['24h', '7d', '30d'];
+if (!in_array($period, $validPeriods, true)) {
+	$period = '7d';
+}
+
+if (strlen($ipAddress) > 45) {
+	$ipAddress = substr($ipAddress, 0, 45);
+}
+
+$periodIntervalSpec = $period === '24h' ? 'PT24H' : ($period === '30d' ? 'P30D' : 'P7D');
+$cutoffUtc = (new DateTimeImmutable('now', new DateTimeZone('UTC')))
+	->sub(new DateInterval($periodIntervalSpec))
+	->format('Y-m-d H:i:s');
+
+$pixels = db()->query('SELECT id, pixel_key, total_hits FROM pd_pixels ORDER BY pixel_key ASC')->fetchAll();
+$selectedPixel = null;
+
+if ($pixelId > 0) {
+	$stmt = db()->prepare('SELECT id, pixel_key, total_hits FROM pd_pixels WHERE id = :id LIMIT 1');
+	$stmt->execute(['id' => $pixelId]);
+	$selectedPixel = $stmt->fetch();
+	if ($selectedPixel) {
+		$pixelKey = (string) $selectedPixel['pixel_key'];
+	}
+} elseif ($pixelKey !== '') {
+	$stmt = db()->prepare('SELECT id, pixel_key, total_hits FROM pd_pixels WHERE pixel_key = :pixel_key LIMIT 1');
+	$stmt->execute(['pixel_key' => $pixelKey]);
+	$selectedPixel = $stmt->fetch();
+	if ($selectedPixel) {
+		$pixelId = (int) $selectedPixel['id'];
+	}
+}
+
+$tableStatus = analytics_table_status();
+$summary = [
+	'hits' => 0,
+	'first_seen' => null,
+	'last_seen' => null,
+	'active_days' => 0,
+	'unique_ref_domains' => 0,
+	'unique_user_agents' => 0,
+];
+$geo = null;
+$referrerRows = [];
+$userAgentRows = [];
+$timelineRows = [];
+$clientRows = [];
+$crossPixelRows = [];
+$recentRows = [];
+
+if ($selectedPixel && $ipAddress !== '') {
+	if ($tableStatus['hit_classification']) {
+		$backfillStmt = db()->prepare(
+			'SELECT h.id, h.pixel_id, h.pixel_key, h.ip_address, h.user_agent, h.referrer, h.request_uri, h.accept_language, h.remote_host
+			 FROM pd_pixel_hits h
+			 LEFT JOIN pd_hit_classification c ON c.hit_id = h.id
+			 WHERE h.pixel_id = :pixel_id AND h.ip_address = :ip_address AND c.hit_id IS NULL
+			 ORDER BY h.id DESC
+			 LIMIT 120'
+		);
+		$backfillStmt->execute([
+			'pixel_id' => (int) $selectedPixel['id'],
+			'ip_address' => $ipAddress,
+		]);
+		$backfillRows = $backfillStmt->fetchAll();
+		foreach ($backfillRows as $row) {
+			try {
+				classify_and_store_hit(
+					(int) $row['id'],
+					(int) $row['pixel_id'],
+					(string) $row['pixel_key'],
+					[
+						'ip_address' => (string) ($row['ip_address'] ?? ''),
+						'user_agent' => (string) ($row['user_agent'] ?? ''),
+						'referrer' => (string) ($row['referrer'] ?? ''),
+						'request_uri' => (string) ($row['request_uri'] ?? ''),
+						'accept_language' => (string) ($row['accept_language'] ?? ''),
+						'remote_host' => (string) ($row['remote_host'] ?? ''),
+					],
+					true
+				);
+			} catch (Throwable $e) {
+			}
+		}
+	}
+
+	if ($tableStatus['ip_enrichment']) {
+		try {
+			$geo = ensure_ip_enrichment($ipAddress, true);
+		} catch (Throwable $e) {
+			$geo = null;
+		}
+	}
+
+	$referrerDomainExpr = "CASE WHEN referrer IS NULL OR TRIM(referrer)='' THEN '-' ELSE LOWER(SUBSTRING_INDEX(SUBSTRING_INDEX(TRIM(referrer),'://',-1),'/',1)) END";
+	$emailCaseExpr = "CASE WHEN h.user_agent LIKE '%GoogleImageProxy%' OR h.remote_host LIKE 'google-proxy-%' OR h.referrer LIKE '%mobile-webview.gmail.com%' OR h.referrer LIKE '%mail.google.com%' THEN 'gmail' WHEN h.user_agent LIKE 'YahooMailProxy%' OR h.remote_host LIKE 'ec%.ycpi.%yahoo.com' THEN 'yahoo_mail' WHEN h.referrer LIKE '%outlook.live.com%' OR h.user_agent LIKE '%OneOutlook/%' OR h.user_agent LIKE '%ms-office%' THEN 'outlook_family' WHEN h.referrer LIKE '%webmail.%' OR h.referrer LIKE '%mail.%' OR h.referrer LIKE '%neo.space%' OR h.referrer LIKE '%titan.email%' THEN 'other_webmail' ELSE 'unknown' END";
+	$clientExpr = $tableStatus['hit_classification'] ? "COALESCE(NULLIF(c.email_client_guess,''), $emailCaseExpr)" : $emailCaseExpr;
+	$trafficExpr = $tableStatus['hit_classification'] ? "COALESCE(NULLIF(c.traffic_type,''), 'unknown')" : "CASE WHEN $clientExpr IN ('gmail','yahoo_mail') THEN 'proxy' ELSE 'unknown' END";
+	$ispExpr = $tableStatus['hit_classification']
+		? "COALESCE(NULLIF(c.isp_guess,''), 'unknown')"
+		: "CASE WHEN h.remote_host IS NULL OR TRIM(h.remote_host)='' THEN 'unknown' WHEN h.remote_host REGEXP '^[0-9]+(\\\\.[0-9]+){3}$' THEN 'ip_unresolved' ELSE LOWER(SUBSTRING_INDEX(TRIM(h.remote_host),'.',-2)) END";
+
+	$summarySql =
+		"SELECT
+			COUNT(*) AS hits,
+			MIN(h.hit_at) AS first_seen,
+			MAX(h.hit_at) AS last_seen,
+			COUNT(DISTINCT DATE(h.hit_at)) AS active_days,
+			COUNT(DISTINCT $referrerDomainExpr) AS unique_ref_domains,
+			COUNT(DISTINCT COALESCE(NULLIF(TRIM(h.user_agent),''),'-')) AS unique_user_agents
+		 FROM pd_pixel_hits h
+		 " . ($tableStatus['hit_classification'] ? 'LEFT JOIN pd_hit_classification c ON c.hit_id = h.id' : '') . "
+		 WHERE h.pixel_id = :pixel_id AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc";
+	$summaryStmt = db()->prepare($summarySql);
+	$summaryStmt->execute([
+		'pixel_id' => (int) $selectedPixel['id'],
+		'ip_address' => $ipAddress,
+		'cutoff_utc' => $cutoffUtc,
+	]);
+	$summary = array_merge($summary, (array) $summaryStmt->fetch());
+
+	$timelineSql =
+		"SELECT DATE(h.hit_at) AS bucket, COUNT(*) AS hits
+		 FROM pd_pixel_hits h
+		 WHERE h.pixel_id = :pixel_id AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+		 GROUP BY bucket
+		 ORDER BY bucket ASC";
+	$timelineStmt = db()->prepare($timelineSql);
+	$timelineStmt->execute([
+		'pixel_id' => (int) $selectedPixel['id'],
+		'ip_address' => $ipAddress,
+		'cutoff_utc' => $cutoffUtc,
+	]);
+	$timelineRows = $timelineStmt->fetchAll();
+
+	$refSql =
+		"SELECT $referrerDomainExpr AS ref_domain, COUNT(*) AS hits
+		 FROM pd_pixel_hits
+		 WHERE pixel_id = :pixel_id AND ip_address = :ip_address AND hit_at >= :cutoff_utc
+		 GROUP BY ref_domain
+		 ORDER BY hits DESC
+		 LIMIT 10";
+	$refStmt = db()->prepare($refSql);
+	$refStmt->execute([
+		'pixel_id' => (int) $selectedPixel['id'],
+		'ip_address' => $ipAddress,
+		'cutoff_utc' => $cutoffUtc,
+	]);
+	$referrerRows = $refStmt->fetchAll();
+
+	$uaSql =
+		"SELECT COALESCE(NULLIF(TRIM(h.user_agent),''),'-') AS user_agent, COUNT(*) AS hits
+		 FROM pd_pixel_hits h
+		 WHERE h.pixel_id = :pixel_id AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+		 GROUP BY user_agent
+		 ORDER BY hits DESC
+		 LIMIT 10";
+	$uaStmt = db()->prepare($uaSql);
+	$uaStmt->execute([
+		'pixel_id' => (int) $selectedPixel['id'],
+		'ip_address' => $ipAddress,
+		'cutoff_utc' => $cutoffUtc,
+	]);
+	$userAgentRows = $uaStmt->fetchAll();
+
+	$clientSql =
+		"SELECT $clientExpr AS client_name, $trafficExpr AS traffic_type, $ispExpr AS isp_name, COUNT(*) AS hits
+		 FROM pd_pixel_hits h
+		 " . ($tableStatus['hit_classification'] ? 'LEFT JOIN pd_hit_classification c ON c.hit_id = h.id' : '') . "
+		 WHERE h.pixel_id = :pixel_id AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+		 GROUP BY client_name, traffic_type, isp_name
+		 ORDER BY hits DESC";
+	$clientStmt = db()->prepare($clientSql);
+	$clientStmt->execute([
+		'pixel_id' => (int) $selectedPixel['id'],
+		'ip_address' => $ipAddress,
+		'cutoff_utc' => $cutoffUtc,
+	]);
+	$clientRows = $clientStmt->fetchAll();
+
+	$crossSql =
+		"SELECT pixel_key, COUNT(*) AS hits, MIN(hit_at) AS first_seen, MAX(hit_at) AS last_seen
+		 FROM pd_pixel_hits
+		 WHERE ip_address = :ip_address
+		 GROUP BY pixel_key
+		 ORDER BY hits DESC
+		 LIMIT 15";
+	$crossStmt = db()->prepare($crossSql);
+	$crossStmt->execute(['ip_address' => $ipAddress]);
+	$crossPixelRows = $crossStmt->fetchAll();
+
+	$recentSql =
+		"SELECT hit_at, referrer, user_agent, remote_host
+		 FROM pd_pixel_hits
+		 WHERE pixel_id = :pixel_id AND ip_address = :ip_address AND hit_at >= :cutoff_utc
+		 ORDER BY hit_at DESC
+		 LIMIT 100";
+	$recentStmt = db()->prepare($recentSql);
+	$recentStmt->execute([
+		'pixel_id' => (int) $selectedPixel['id'],
+		'ip_address' => $ipAddress,
+		'cutoff_utc' => $cutoffUtc,
+	]);
+	$recentRows = $recentStmt->fetchAll();
+}
+
+render_header('IP Drilldown');
+?>
+<div class="spaced card">
+	<div>
+		<h1>IP Drilldown</h1>
+		<p class="muted">Analyze one IP address within a pixel and across all pixels.</p>
+	</div>
+	<div class="inline">
+		<a class="nav-btn" href="analytics.php<?php echo $pixelKey !== '' ? '?pixel_key=' . urlencode($pixelKey) . '&period=' . urlencode($period) : ''; ?>">Back to analytics</a>
+		<a class="nav-btn" href="stats.php<?php echo $pixelKey !== '' ? '?pixel_key=' . urlencode($pixelKey) . '&period=' . urlencode($period) : ''; ?>">Back to stats</a>
+		<a class="nav-btn logout" href="../logout.php">Logout</a>
+	</div>
+</div>
+
+<div class="card">
+	<form method="get" class="row">
+		<div>
+			<label>Pixel ID</label>
+			<select name="pixel_key">
+				<option value="">Select pixel</option>
+				<?php foreach ($pixels as $pixel): ?>
+					<option value="<?php echo e((string) $pixel['pixel_key']); ?>" <?php echo $pixelKey === (string) $pixel['pixel_key'] ? 'selected' : ''; ?>>
+						<?php echo e((string) $pixel['pixel_key']); ?> (<?php echo e((string) $pixel['total_hits']); ?>)
+					</option>
+				<?php endforeach; ?>
+			</select>
+		</div>
+		<div>
+			<label>IP Address</label>
+			<input type="text" name="ip" value="<?php echo e($ipAddress); ?>" placeholder="74.125.215.2" maxlength="45">
+		</div>
+		<div>
+			<label>Period</label>
+			<select name="period">
+				<?php foreach ($validPeriods as $opt): ?>
+					<option value="<?php echo e($opt); ?>" <?php echo $period === $opt ? 'selected' : ''; ?>><?php echo e($opt); ?></option>
+				<?php endforeach; ?>
+			</select>
+		</div>
+		<div style="align-self:end;"><button type="submit">Load IP Details</button></div>
+	</form>
+</div>
+
+<?php if (!$tableStatus['hit_classification'] || !$tableStatus['ip_enrichment']): ?>
+	<div class="error">Some enrichment tables are missing. Run <a href="../migrate.php">migrations</a> for full IP analytics.</div>
+<?php endif; ?>
+
+<?php if ($pixelKey !== '' && !$selectedPixel): ?>
+	<div class="error">Pixel not found.</div>
+<?php endif; ?>
+
+<?php if ($selectedPixel && $ipAddress === ''): ?>
+	<div class="error">Enter an IP address to load details.</div>
+<?php endif; ?>
+
+<?php if ($selectedPixel && $ipAddress !== ''): ?>
+	<div class="card">
+		<h2>IP: <?php echo e($ipAddress); ?></h2>
+		<p class="muted">Pixel: <?php echo e((string) $selectedPixel['pixel_key']); ?> | Period: <?php echo e($period); ?> | UTC Window start: <?php echo e($cutoffUtc); ?></p>
+	</div>
+
+	<div class="row">
+		<div class="card"><h3>Hits</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['hits'] ?? 0))); ?></p></div>
+		<div class="card"><h3>Active Days</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['active_days'] ?? 0))); ?></p></div>
+		<div class="card"><h3>Unique Referrers</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['unique_ref_domains'] ?? 0))); ?></p></div>
+		<div class="card"><h3>User Agent Variants</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['unique_user_agents'] ?? 0))); ?></p></div>
+	</div>
+
+	<div class="card">
+		<h3>First/Last Seen</h3>
+		<p class="muted">First: <?php echo e(format_db_datetime((string) ($summary['first_seen'] ?? ''), 'Y-m-d H:i:s', '-')); ?> | Last: <?php echo e(format_db_datetime((string) ($summary['last_seen'] ?? ''), 'Y-m-d H:i:s', '-')); ?> (<?php echo e(app_timezone_name()); ?>)</p>
+	</div>
+
+	<div class="row">
+		<div class="card">
+			<h3>Geo / Network</h3>
+			<table>
+				<tbody>
+				<tr><th>Country</th><td><?php echo e((string) ($geo['country_code'] ?? '-')); ?></td></tr>
+				<tr><th>Region</th><td><?php echo e((string) ($geo['region'] ?? '-')); ?></td></tr>
+				<tr><th>City</th><td><?php echo e((string) ($geo['city'] ?? '-')); ?></td></tr>
+				<tr><th>ASN</th><td><?php echo e((string) ($geo['asn'] ?? '-')); ?></td></tr>
+				<tr><th>ASN Org</th><td><?php echo e((string) ($geo['asn_org'] ?? '-')); ?></td></tr>
+				<tr><th>ISP</th><td><?php echo e((string) ($geo['isp_name'] ?? '-')); ?></td></tr>
+				<tr><th>Proxy</th><td><?php echo ((int) ($geo['is_proxy'] ?? 0) === 1) ? 'Yes' : 'No'; ?></td></tr>
+				<tr><th>Hosting</th><td><?php echo ((int) ($geo['is_hosting'] ?? 0) === 1) ? 'Yes' : 'No'; ?></td></tr>
+				<tr><th>Source</th><td><?php echo e((string) ($geo['source'] ?? '-')); ?></td></tr>
+				</tbody>
+			</table>
+		</div>
+
+		<div class="card">
+			<h3>Client / Traffic / ISP Mix</h3>
+			<table>
+				<thead><tr><th>Client</th><th>Traffic</th><th>ISP</th><th>Hits</th></tr></thead>
+				<tbody>
+				<?php if (!$clientRows): ?>
+					<tr><td colspan="4" class="muted">No data.</td></tr>
+				<?php else: ?>
+					<?php foreach ($clientRows as $row): ?>
+						<tr>
+							<td><?php echo e((string) ($row['client_name'] ?? 'unknown')); ?></td>
+							<td><?php echo e((string) ($row['traffic_type'] ?? 'unknown')); ?></td>
+							<td><?php echo e((string) ($row['isp_name'] ?? 'unknown')); ?></td>
+							<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
+						</tr>
+					<?php endforeach; ?>
+				<?php endif; ?>
+				</tbody>
+			</table>
+		</div>
+	</div>
+
+	<div class="row">
+		<div class="card">
+			<h3>Top Referrers</h3>
+			<table>
+				<thead><tr><th>Referrer Domain</th><th>Hits</th></tr></thead>
+				<tbody>
+				<?php if (!$referrerRows): ?>
+					<tr><td colspan="2" class="muted">No data.</td></tr>
+				<?php else: ?>
+					<?php foreach ($referrerRows as $row): ?>
+						<tr>
+							<td><?php echo e((string) ($row['ref_domain'] ?? '-')); ?></td>
+							<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
+						</tr>
+					<?php endforeach; ?>
+				<?php endif; ?>
+				</tbody>
+			</table>
+		</div>
+
+		<div class="card">
+			<h3>User Agents</h3>
+			<table>
+				<thead><tr><th>User Agent</th><th>Hits</th></tr></thead>
+				<tbody>
+				<?php if (!$userAgentRows): ?>
+					<tr><td colspan="2" class="muted">No data.</td></tr>
+				<?php else: ?>
+					<?php foreach ($userAgentRows as $row): ?>
+						<tr>
+							<td><?php echo e((string) ($row['user_agent'] ?? '-')); ?></td>
+							<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
+						</tr>
+					<?php endforeach; ?>
+				<?php endif; ?>
+				</tbody>
+			</table>
+		</div>
+	</div>
+
+	<div class="card">
+		<h3>Hits by Day</h3>
+		<table>
+			<thead><tr><th>Day (UTC)</th><th>Hits</th></tr></thead>
+			<tbody>
+			<?php if (!$timelineRows): ?>
+				<tr><td colspan="2" class="muted">No data.</td></tr>
+			<?php else: ?>
+				<?php foreach ($timelineRows as $row): ?>
+					<tr>
+						<td><?php echo e((string) ($row['bucket'] ?? '-')); ?></td>
+						<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
+					</tr>
+				<?php endforeach; ?>
+			<?php endif; ?>
+			</tbody>
+		</table>
+	</div>
+
+	<div class="card">
+		<h3>Cross-Pixel Activity for this IP</h3>
+		<table>
+			<thead><tr><th>Pixel</th><th>Hits</th><th>First Seen</th><th>Last Seen</th><th>Open</th></tr></thead>
+			<tbody>
+			<?php if (!$crossPixelRows): ?>
+				<tr><td colspan="5" class="muted">No data.</td></tr>
+			<?php else: ?>
+				<?php foreach ($crossPixelRows as $row): ?>
+					<tr>
+						<td><?php echo e((string) ($row['pixel_key'] ?? '')); ?></td>
+						<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
+						<td><?php echo e(format_db_datetime((string) ($row['first_seen'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
+						<td><?php echo e(format_db_datetime((string) ($row['last_seen'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
+						<td><a href="ip-details.php?pixel_key=<?php echo urlencode((string) ($row['pixel_key'] ?? '')); ?>&ip=<?php echo urlencode($ipAddress); ?>&period=<?php echo urlencode($period); ?>">Open</a></td>
+					</tr>
+				<?php endforeach; ?>
+			<?php endif; ?>
+			</tbody>
+		</table>
+	</div>
+
+	<div class="card">
+		<h3>Recent Hits</h3>
+		<table>
+			<thead><tr><th>Date/Time</th><th>Referrer</th><th>User Agent</th><th>Remote Host</th></tr></thead>
+			<tbody>
+			<?php if (!$recentRows): ?>
+				<tr><td colspan="4" class="muted">No data.</td></tr>
+			<?php else: ?>
+				<?php foreach ($recentRows as $row): ?>
+					<tr>
+						<td><?php echo e(format_db_datetime((string) ($row['hit_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
+						<td><?php echo e((string) (($row['referrer'] ?? '') !== '' ? $row['referrer'] : '-')); ?></td>
+						<td><?php echo e((string) (($row['user_agent'] ?? '') !== '' ? $row['user_agent'] : '-')); ?></td>
+						<td><?php echo e((string) (($row['remote_host'] ?? '') !== '' ? $row['remote_host'] : '-')); ?></td>
+					</tr>
+				<?php endforeach; ?>
+			<?php endif; ?>
+			</tbody>
+		</table>
+	</div>
+<?php endif; ?>
+<?php
+render_footer();

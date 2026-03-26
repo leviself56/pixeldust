@@ -18,12 +18,8 @@ $changes = [];
 $error = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-	$pdo = null;
 	try {
-		$pdo = db();
-		$pdo->beginTransaction();
-		$changes = run_schema_migrations($pdo);
-		$pdo->commit();
+		$changes = run_schema_migrations(db());
 
 		if (!$changes) {
 			flash('success', 'Schema check complete. No changes required.');
@@ -33,9 +29,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 		}
 		redirect('migrate.php');
 	} catch (Throwable $e) {
-		if ($pdo instanceof PDO && $pdo->inTransaction()) {
-			$pdo->rollBack();
-		}
 		$error = 'Migration failed: ' . $e->getMessage();
 	}
 }

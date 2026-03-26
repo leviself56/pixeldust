@@ -113,6 +113,7 @@ render_header('Admin Dashboard');
 	</div>
 	<div class="inline">
 		<a class="nav-btn" href="stats.php">View detailed stats</a>
+		<a class="nav-btn" href="analytics.php">View analytics</a>
 		<a class="nav-btn" href="users.php">Manage users</a>
 		<a class="nav-btn" href="triggers.php">Manage triggers</a>
 		<a class="nav-btn" href="../migrate.php">Run migrations</a>
@@ -199,11 +200,12 @@ render_header('Admin Dashboard');
 				<th>Last Hit</th>
 				<th>Embed</th>
 				<th>Stats</th>
+				<th>Analytics</th>
 			</tr>
 		</thead>
 		<tbody>
 			<?php if (!$pixels): ?>
-				<tr id="pixel-empty-row"><td colspan="5" class="muted">No pixels yet.</td></tr>
+				<tr id="pixel-empty-row"><td colspan="6" class="muted">No pixels yet.</td></tr>
 			<?php else: ?>
 				<?php foreach ($pixels as $pixel): ?>
 						<?php
@@ -223,6 +225,7 @@ render_header('Admin Dashboard');
 							</span>
 						</td>
 						<td><a class="nav-btn" href="stats.php?pixel_key=<?php echo urlencode((string) $pixel['pixel_key']); ?>">Open</a></td>
+						<td><a class="nav-btn" href="analytics.php?pixel_key=<?php echo urlencode((string) $pixel['pixel_key']); ?>">Open</a></td>
 					</tr>
 				<?php endforeach; ?>
 			<?php endif; ?>

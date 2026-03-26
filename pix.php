@@ -78,6 +78,24 @@ try {
 } catch (Throwable $e) {
 }
 
+try {
+	classify_and_store_hit($hitId, $pixelId, $pixelKey, [
+		'ip_address' => $ipAddress,
+		'user_agent' => $userAgent,
+		'referrer' => $referrer,
+		'request_uri' => $requestUri,
+		'accept_language' => $acceptLanguage,
+		'remote_host' => $remoteHost,
+	], false);
+} catch (Throwable $e) {
+}
+
+try {
+	enqueue_ip_for_enrichment($ipAddress);
+	try_start_ip_enrichment_worker(30);
+} catch (Throwable $e) {
+}
+
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 header('Pragma: no-cache');
 header('Expires: 0');

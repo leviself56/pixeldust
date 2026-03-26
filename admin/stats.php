@@ -179,6 +179,7 @@ render_header('Stats');
 	</div>
 	<div class="inline">
 		<a class="nav-btn" href="index.php">Back to dashboard</a>
+		<a class="nav-btn" href="analytics.php<?php echo $pixelKey !== '' ? '?pixel_key=' . urlencode($pixelKey) . '&period=' . urlencode($period) : ''; ?>">Analytics</a>
 		<a class="nav-btn logout" href="../logout.php">Logout</a>
 	</div>
 </div>
@@ -224,7 +225,8 @@ render_header('Stats');
 		<p class="muted">Showing <?php echo e((string) ($recentHitsTotal === 0 ? 0 : (($recentHitsPage - 1) * $recentHitsPerPage + 1))); ?>-
 			<?php echo e((string) min($recentHitsPage * $recentHitsPerPage, $recentHitsTotal)); ?> of
 			<?php echo e((string) $recentHitsTotal); ?></p>
-		<table>
+		<div style="width:100%;overflow-x:auto;">
+		<table style="min-width:100%;table-layout:fixed;">
 			<thead>
 			<tr>
 				<th>Date/Time</th>
@@ -240,18 +242,26 @@ render_header('Stats');
 				<tr><td colspan="6" class="muted">No hits yet.</td></tr>
 			<?php else: ?>
 				<?php foreach ($recentHits as $hit): ?>
+					<?php $hitIp = (string) ($hit['ip_address'] ?? ''); ?>
 					<tr>
-						<td><?php echo e(format_db_datetime((string) ($hit['hit_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
-						<td><?php echo e((string) $hit['ip_address']); ?></td>
-						<td><?php echo e((string) ($hit['referrer'] ?: '-')); ?></td>
-						<td><?php echo e((string) ($hit['user_agent'] ?: '-')); ?></td>
-						<td><?php echo e((string) ($hit['accept_language'] ?: '-')); ?></td>
-						<td><?php echo e((string) ($hit['remote_host'] ?: '-')); ?></td>
+						<td style="word-break:break-word;"><?php echo e(format_db_datetime((string) ($hit['hit_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
+						<td>
+							<?php if ($hitIp !== ''): ?>
+								<a href="ip-details.php?pixel_key=<?php echo urlencode((string) $selectedPixel['pixel_key']); ?>&ip=<?php echo urlencode($hitIp); ?>&period=<?php echo urlencode($period); ?>"><?php echo e($hitIp); ?></a>
+							<?php else: ?>
+								-
+							<?php endif; ?>
+						</td>
+						<td style="word-break:break-word;"><?php echo e((string) ($hit['referrer'] ?: '-')); ?></td>
+						<td style="word-break:break-word;"><?php echo e((string) ($hit['user_agent'] ?: '-')); ?></td>
+						<td style="word-break:break-word;"><?php echo e((string) ($hit['accept_language'] ?: '-')); ?></td>
+						<td style="word-break:break-word;"><?php echo e((string) ($hit['remote_host'] ?: '-')); ?></td>
 					</tr>
 				<?php endforeach; ?>
 			<?php endif; ?>
 			</tbody>
 		</table>
+		</div>
 		<?php if ($recentHitsTotalPages > 1): ?>
 			<div class="inline" style="margin-top:12px;">
 				<?php if ($recentHitsPage > 1): ?>
