@@ -518,7 +518,7 @@ render_header('IP Drilldown');
 							<?php endif; ?>
 							<input type="hidden" name="ip" value="<?php echo e($ipAddress); ?>">
 							<input type="hidden" name="period" value="<?php echo e($period); ?>">
-							<input type="text" name="operator_tag" value="<?php echo e($ipOperatorTag); ?>" maxlength="191" placeholder="Example: Levi" style="width:220px;max-width:100%;">
+							<input type="text" name="operator_tag" value="<?php echo e($ipOperatorTag); ?>" maxlength="191" placeholder="alias this IP address" style="width:220px;max-width:100%;">
 							<button type="submit">Save</button>
 						</form>
 					</td>
