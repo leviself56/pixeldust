@@ -1584,7 +1584,21 @@ function lookup_ip_enrichment_remote(string $ipAddress): array
 	}
 
 	$decoded = json_decode($response, true);
-	if (!is_array($decoded) || ($decoded['status'] ?? '') !== 'success') {
+	if (!is_array($decoded)) {
+		return $rdapFallback();
+	}
+
+	$statusValue = strtolower(trim((string) ($decoded['status'] ?? '')));
+	if ($statusValue !== 'success') {
+		$message = strtolower(trim((string) ($decoded['message'] ?? '')));
+		if (
+			strpos($message, 'limit') !== false ||
+			strpos($message, 'throttle') !== false ||
+			strpos($message, 'too many') !== false ||
+			strpos($message, 'quota') !== false
+		) {
+			return $default;
+		}
 		return $rdapFallback();
 	}
 
@@ -1628,6 +1642,25 @@ function unresolved_enrichment_retry_seconds(): int
 	}
 
 	return $seconds;
+}
+
+function ip_enrichment_max_remote_lookups_per_run(): int
+{
+	$app = app_config()['app'] ?? [];
+	$analytics = app_config()['analytics'] ?? [];
+	$raw = $app['ip_enrichment_max_remote_lookups_per_run']
+		?? $analytics['ip_enrichment_max_remote_lookups_per_run']
+		?? app_config()['ip_enrichment_max_remote_lookups_per_run']
+		?? 20;
+	$limit = (int) $raw;
+	if ($limit < 1) {
+		$limit = 1;
+	}
+	if ($limit > 200) {
+		$limit = 200;
+	}
+
+	return $limit;
 }
 
 function upsert_ip_enrichment(array $enrichment): void
@@ -2791,6 +2824,9 @@ function process_ip_enrichment_queue(int $maxRows = 100, int $maxRuntimeSeconds 
 	$succeeded = 0;
 	$failed = 0;
 	$autoBotTagged = 0;
+	$maxRemoteLookups = ip_enrichment_max_remote_lookups_per_run();
+	$remoteLookups = 0;
+	$remoteBudgetReached = false;
 	$accessLogResult = [
 		'enabled' => false,
 		'processed_lines' => 0,
@@ -2832,6 +2868,11 @@ function process_ip_enrichment_queue(int $maxRows = 100, int $maxRuntimeSeconds 
 						break;
 					}
 
+					if ($remoteLookups >= $maxRemoteLookups) {
+						$remoteBudgetReached = true;
+						break;
+					}
+
 					$processed++;
 					$ipAddress = trim((string) ($row['ip_address'] ?? ''));
 					$attempt = (int) ($row['attempt_count'] ?? 0) + 1;
@@ -2840,6 +2881,8 @@ function process_ip_enrichment_queue(int $maxRows = 100, int $maxRuntimeSeconds 
 						$failed++;
 						continue;
 					}
+
+					$remoteLookups++;
 
 					try {
 						$enrichment = ensure_ip_enrichment($ipAddress, true);
@@ -2861,12 +2904,16 @@ function process_ip_enrichment_queue(int $maxRows = 100, int $maxRuntimeSeconds 
 					}
 
 					$failed++;
-					$retrySeconds = min(3600, (int) pow(2, min($attempt, 10)));
+					$retrySeconds = max(300, min(3600, (int) pow(2, min($attempt, 10))));
 					$failStmt->bindValue(':attempt_count', $attempt, PDO::PARAM_INT);
 					$failStmt->bindValue(':retry_seconds', $retrySeconds, PDO::PARAM_INT);
 					$failStmt->bindValue(':last_error', 'lookup_failed', PDO::PARAM_STR);
 					$failStmt->bindValue(':ip_address', $ipAddress, PDO::PARAM_STR);
 					$failStmt->execute();
+				}
+
+				if ($remoteBudgetReached) {
+					break;
 				}
 			}
 		}
