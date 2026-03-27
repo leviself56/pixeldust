@@ -93,6 +93,7 @@ $redirectKey = trim((string) ($_GET['redirect_key'] ?? ''));
 $sourceKey = $sourceType === 'redirect' ? $redirectKey : $pixelKey;
 $period = (string) ($_GET['period'] ?? '7d');
 $heatmapMetric = trim((string) ($_GET['heatmap_metric'] ?? 'estimated_visits'));
+$providerFilter = trim((string) ($_GET['provider'] ?? ''));
 $validHeatmapMetrics = ['hits', 'estimated_visits'];
 if (!in_array($heatmapMetric, $validHeatmapMetrics, true)) {
 	$heatmapMetric = 'hits';
@@ -156,6 +157,8 @@ $topCountries = [];
 $clientMix = [];
 $timelineRows = [];
 $topIps = [];
+$providerIps = [];
+$providerLookupError = '';
 $heatmapRows = [];
 $heatmapGrid = [];
 $heatmapMaxHits = 0;
@@ -268,6 +271,32 @@ if ($selectedSource) {
 		'cutoff_utc' => $cutoffUtc,
 	]);
 	$topIsps = $ispStmt->fetchAll();
+
+	if ($providerFilter !== '') {
+		try {
+			$providerIpsSql =
+				"SELECT h.ip_address, COUNT(*) AS hits, MAX(h.hit_at) AS last_seen
+				 FROM $hitTable h
+				 $joinClassification
+				 $joinEnrichment
+				 WHERE h.$idColumn = :source_id
+				   AND h.hit_at >= :cutoff_utc
+				   AND ($ispExpr) = :provider
+				 GROUP BY h.ip_address
+				 ORDER BY hits DESC, last_seen DESC
+				 LIMIT 200";
+			$providerIpsStmt = db()->prepare($providerIpsSql);
+			$providerIpsStmt->execute([
+				'source_id' => (int) $selectedSource['id'],
+				'cutoff_utc' => $cutoffUtc,
+				'provider' => $providerFilter,
+			]);
+			$providerIps = $providerIpsStmt->fetchAll();
+		} catch (Throwable $e) {
+			$providerIps = [];
+			$providerLookupError = 'Unable to load provider drilldown right now.';
+		}
+	}
 
 	if ($tableStatus['ip_enrichment']) {
 		$geoSql =
@@ -414,6 +443,9 @@ render_header('Analytics');
 
 <div class="card">
 	<form method="get" class="row">
+		<?php if ($providerFilter !== ''): ?>
+			<input type="hidden" name="provider" value="<?php echo e($providerFilter); ?>">
+		<?php endif; ?>
 		<div>
 			<label>Source Type</label>
 			<select name="source_type">
@@ -548,13 +580,70 @@ render_header('Analytics');
 					<tr><td colspan="3" class="muted">No data.</td></tr>
 				<?php else: ?>
 					<?php foreach ($topIsps as $row): ?>
-						<tr><td><?php echo e((string) ($row['isp'] ?? 'unknown')); ?></td><td><?php echo e((string) ($row['hits'] ?? 0)); ?></td><td><?php echo e((string) ($row['unique_ips'] ?? 0)); ?></td></tr>
+						<?php
+						$providerName = (string) ($row['isp'] ?? 'unknown');
+						$providerParams = [
+							'source_type' => $sourceType,
+							'period' => $period,
+							'heatmap_metric' => $heatmapMetric,
+							'provider' => $providerName,
+						];
+						if ($sourceType === 'redirect') {
+							$providerParams['redirect_key'] = (string) $selectedSource['source_key'];
+						} else {
+							$providerParams['pixel_key'] = (string) $selectedSource['source_key'];
+						}
+						$providerHref = 'analytics.php?' . http_build_query($providerParams);
+						?>
+						<tr>
+							<td><a href="<?php echo e($providerHref); ?>"><?php echo e($providerName); ?></a></td>
+							<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
+							<td><?php echo e((string) ($row['unique_ips'] ?? 0)); ?></td>
+						</tr>
 					<?php endforeach; ?>
 				<?php endif; ?>
 				</tbody>
 			</table>
 		</div>
 	</div>
+
+	<?php if ($providerFilter !== ''): ?>
+		<div class="card">
+			<?php
+			$clearProviderParams = [
+				'source_type' => $sourceType,
+				'period' => $period,
+				'heatmap_metric' => $heatmapMetric,
+			];
+			if ($sourceType === 'redirect') {
+				$clearProviderParams['redirect_key'] = (string) $selectedSource['source_key'];
+			} else {
+				$clearProviderParams['pixel_key'] = (string) $selectedSource['source_key'];
+			}
+			?>
+			<h3>Provider Drilldown: <?php echo e($providerFilter); ?></h3>
+			<p class="muted">IPs that matched this provider in the selected window. <a href="<?php echo e('analytics.php?' . http_build_query($clearProviderParams)); ?>">Clear provider filter</a></p>
+			<?php if ($providerLookupError !== ''): ?>
+				<div class="error"><?php echo e($providerLookupError); ?></div>
+			<?php endif; ?>
+			<table>
+				<thead><tr><th>IP Address</th><th>Hits</th><th>Last Seen (UTC)</th></tr></thead>
+				<tbody>
+				<?php if (!$providerIps): ?>
+					<tr><td colspan="3" class="muted">No IPs matched this provider in the selected period.</td></tr>
+				<?php else: ?>
+					<?php foreach ($providerIps as $row): ?>
+						<tr>
+							<td><?php echo e((string) ($row['ip_address'] ?? '')); ?></td>
+							<td><?php echo e((string) ((int) ($row['hits'] ?? 0))); ?></td>
+							<td><?php echo e((string) ($row['last_seen'] ?? '')); ?></td>
+						</tr>
+					<?php endforeach; ?>
+				<?php endif; ?>
+				</tbody>
+			</table>
+		</div>
+	<?php endif; ?>
 
 	<div class="row">
 		<div class="card">
