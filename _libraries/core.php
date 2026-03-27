@@ -1203,6 +1203,114 @@ function lookup_ip_enrichment_remote(string $ipAddress): array
 		return $default;
 	}
 
+	$fetchJson = static function (string $url): ?array {
+		$response = false;
+
+		if (function_exists('curl_init')) {
+			$ch = curl_init($url);
+			if ($ch !== false) {
+				curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+				curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2);
+				curl_setopt($ch, CURLOPT_TIMEOUT, 4);
+				curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+				curl_setopt($ch, CURLOPT_MAXREDIRS, 3);
+				$response = curl_exec($ch);
+				curl_close($ch);
+			}
+		} else {
+			$context = stream_context_create([
+				'http' => [
+					'timeout' => 4,
+				],
+			]);
+			$response = @file_get_contents($url, false, $context);
+		}
+
+		if (!is_string($response) || trim($response) === '') {
+			return null;
+		}
+
+		$decoded = json_decode($response, true);
+		return is_array($decoded) ? $decoded : null;
+	};
+
+	$rdapFallback = static function () use ($ipAddress, $default, $fetchJson): array {
+		$rdap = $fetchJson('https://rdap.org/ip/' . rawurlencode($ipAddress));
+		if (!is_array($rdap)) {
+			return $default;
+		}
+
+		$country = strtoupper(substr((string) ($rdap['country'] ?? ''), 0, 2));
+		if ($country === '') {
+			$country = null;
+		}
+
+		$networkName = trim((string) ($rdap['name'] ?? ''));
+		$handle = trim((string) ($rdap['handle'] ?? ''));
+
+		$entityOrg = null;
+		$entities = $rdap['entities'] ?? null;
+		if (is_array($entities)) {
+			foreach ($entities as $entity) {
+				if (!is_array($entity)) {
+					continue;
+				}
+				$vcardArray = $entity['vcardArray'] ?? null;
+				if (!is_array($vcardArray) || !isset($vcardArray[1]) || !is_array($vcardArray[1])) {
+					continue;
+				}
+				foreach ($vcardArray[1] as $vcardItem) {
+					if (!is_array($vcardItem) || count($vcardItem) < 4) {
+						continue;
+					}
+					$field = strtolower((string) ($vcardItem[0] ?? ''));
+					$value = trim((string) ($vcardItem[3] ?? ''));
+					if (($field === 'fn' || $field === 'org') && $value !== '') {
+						$entityOrg = $value;
+						break 2;
+					}
+				}
+			}
+		}
+
+		$asn = null;
+		if ($handle !== '' && preg_match('/^AS[0-9]+$/i', $handle) === 1) {
+			$asn = strtoupper($handle);
+		}
+
+		$asnOrg = null;
+		if ($entityOrg !== null && trim($entityOrg) !== '') {
+			$asnOrg = trim($entityOrg);
+		} elseif ($networkName !== '') {
+			$asnOrg = $networkName;
+		}
+
+		$ispName = $asnOrg;
+
+		if ($country === null && $asnOrg === null && $ispName === null && $asn === null) {
+			$none = $default;
+			$none['source'] = 'no_source_result';
+			$none['confidence'] = 0.05;
+			return $none;
+		}
+
+		return [
+			'ip_address' => $ipAddress,
+			'country_code' => $country,
+			'region' => null,
+			'city' => null,
+			'latitude' => null,
+			'longitude' => null,
+			'asn' => $asn,
+			'asn_org' => $asnOrg,
+			'isp_name' => $ispName,
+			'is_proxy' => 0,
+			'is_hosting' => 0,
+			'source' => 'rdap',
+			'confidence' => 0.45,
+		];
+	};
+
 	$url = 'http://ip-api.com/json/' . rawurlencode($ipAddress) . '?fields=status,countryCode,regionName,city,lat,lon,as,isp,proxy,hosting,query';
 	$response = false;
 
@@ -1225,12 +1333,12 @@ function lookup_ip_enrichment_remote(string $ipAddress): array
 	}
 
 	if (!is_string($response) || trim($response) === '') {
-		return $default;
+		return $rdapFallback();
 	}
 
 	$decoded = json_decode($response, true);
 	if (!is_array($decoded) || ($decoded['status'] ?? '') !== 'success') {
-		return $default;
+		return $rdapFallback();
 	}
 
 	$asnRaw = trim((string) ($decoded['as'] ?? ''));
@@ -1257,6 +1365,22 @@ function lookup_ip_enrichment_remote(string $ipAddress): array
 		'source' => 'ip-api.com',
 		'confidence' => 0.7,
 	];
+}
+
+function unresolved_enrichment_retry_seconds(): int
+{
+	$app = app_config()['app'] ?? [];
+	$analytics = app_config()['analytics'] ?? [];
+	$raw = $app['unresolved_retry_seconds'] ?? $analytics['unresolved_retry_seconds'] ?? app_config()['unresolved_retry_seconds'] ?? 21600;
+	$seconds = (int) $raw;
+	if ($seconds < 300) {
+		$seconds = 300;
+	}
+	if ($seconds > 604800) {
+		$seconds = 604800;
+	}
+
+	return $seconds;
 }
 
 function upsert_ip_enrichment(array $enrichment): void
@@ -1338,7 +1462,18 @@ function ensure_ip_enrichment(string $ipAddress, bool $allowRemoteLookup = false
 			$existing['is_proxy'] = (int) ($existing['is_proxy'] ?? 0);
 			$existing['is_hosting'] = (int) ($existing['is_hosting'] ?? 0);
 			$existing['confidence'] = (float) ($existing['confidence'] ?? 0);
-			return $existing;
+			$existingSource = trim((string) ($existing['source'] ?? ''));
+			if (!$allowRemoteLookup || ($existingSource !== '' && $existingSource !== 'unresolved')) {
+				return $existing;
+			}
+
+			$updatedAt = parse_db_datetime_utc((string) ($existing['updated_at'] ?? ''));
+			if ($updatedAt instanceof DateTimeImmutable) {
+				$ageSeconds = time() - $updatedAt->getTimestamp();
+				if ($ageSeconds >= 0 && $ageSeconds < unresolved_enrichment_retry_seconds()) {
+					return $existing;
+				}
+			}
 		}
 	} catch (Throwable $e) {
 		return $default;
