@@ -100,15 +100,19 @@ $validHeatmapMetrics = ['hits', 'estimated_visits'];
 if (!in_array($heatmapMetric, $validHeatmapMetrics, true)) {
 	$heatmapMetric = 'hits';
 }
-$validPeriods = ['24h', '7d', '30d'];
+$validPeriods = ['24h', '7d', '30d', 'all'];
 if (!in_array($period, $validPeriods, true)) {
 	$period = '7d';
 }
 
-$periodIntervalSpec = $period === '24h' ? 'PT24H' : ($period === '30d' ? 'P30D' : 'P7D');
-$cutoffUtc = (new DateTimeImmutable('now', new DateTimeZone('UTC')))
-	->sub(new DateInterval($periodIntervalSpec))
-	->format('Y-m-d H:i:s');
+if ($period === 'all') {
+	$cutoffUtc = '1970-01-01 00:00:00';
+} else {
+	$periodIntervalSpec = $period === '24h' ? 'PT24H' : ($period === '30d' ? 'P30D' : 'P7D');
+	$cutoffUtc = (new DateTimeImmutable('now', new DateTimeZone('UTC')))
+		->sub(new DateInterval($periodIntervalSpec))
+		->format('Y-m-d H:i:s');
+}
 $appTimezoneName = app_timezone_name();
 $appTimezoneOffsetMinutes = (int) floor((new DateTimeImmutable('now', app_timezone_object()))->getOffset() / 60);
 
@@ -176,6 +180,9 @@ $heatmapWeekdayLabels = [
 	6 => 'Fri',
 	7 => 'Sat',
 ];
+$heatmapMode = 'weekday_hour';
+$heatmapRowOrder = array_keys($heatmapWeekdayLabels);
+$heatmapRowLabels = $heatmapWeekdayLabels;
 
 if ($selectedSource) {
 	if ($sourceType === 'redirect' && $tableStatus['redirect_hit_classification']) {
@@ -386,55 +393,107 @@ if ($selectedSource) {
 	$timelineStmt->execute();
 	$timelineRows = $timelineStmt->fetchAll();
 
-	if ($heatmapMetric === 'estimated_visits') {
-		$heatmapFingerprintExpr = "CONCAT(COALESCE(h.ip_address, ''), '|', MD5(CONCAT(COALESCE(h.user_agent, ''), '|', COALESCE(h.accept_language, ''))))";
-		$heatmapSql =
-			"WITH ordered_hits AS (
-				SELECT
-					$localHitExpr AS local_hit_at,
-					h.hit_at,
-					LAG(h.hit_at) OVER (PARTITION BY $heatmapFingerprintExpr ORDER BY h.hit_at) AS prev_hit
-				FROM $hitTable h
-				WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc
-			)
-			SELECT DAYOFWEEK(local_hit_at) AS weekday_idx, HOUR(local_hit_at) AS hour_idx,
-				COALESCE(SUM(CASE WHEN prev_hit IS NULL OR TIMESTAMPDIFF(MINUTE, prev_hit, hit_at) > 30 THEN 1 ELSE 0 END), 0) AS hits
-			FROM ordered_hits
-			GROUP BY weekday_idx, hour_idx
-			ORDER BY weekday_idx ASC, hour_idx ASC";
-	} else {
-		$heatmapSql =
-			"SELECT DAYOFWEEK($localHitExpr) AS weekday_idx, HOUR($localHitExpr) AS hour_idx, COUNT(*) AS hits
-			 FROM $hitTable h
-			 WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc
-			 GROUP BY weekday_idx, hour_idx
-			 ORDER BY weekday_idx ASC, hour_idx ASC";
-	}
-	$heatmapStmt = db()->prepare($heatmapSql);
-	$heatmapStmt->bindValue(':tz_name', $appTimezoneName, PDO::PARAM_STR);
-	$heatmapStmt->bindValue(':tz_offset_minute', $appTimezoneOffsetMinutes, PDO::PARAM_INT);
-	$heatmapStmt->bindValue(':source_id', (int) $selectedSource['id'], PDO::PARAM_INT);
-	$heatmapStmt->bindValue(':cutoff_utc', $cutoffUtc, PDO::PARAM_STR);
-	$heatmapStmt->execute();
-	$heatmapRows = $heatmapStmt->fetchAll();
+	if ($period !== 'all') {
+		if ($period === '30d' || $period === '24h' || $period === '7d') {
+			$heatmapMode = 'date_hour';
+			$heatmapRowOrder = [];
+			$heatmapRowLabels = [];
 
-	foreach ($heatmapWeekdayLabels as $weekdayIdx => $weekdayLabel) {
-		$heatmapGrid[$weekdayIdx] = [];
-		for ($hour = 0; $hour < 24; $hour++) {
-			$heatmapGrid[$weekdayIdx][$hour] = 0;
-		}
-	}
+			$cutoffLocalDay = (new DateTimeImmutable($cutoffUtc, new DateTimeZone('UTC')))
+				->setTimezone(app_timezone_object())
+				->setTime(0, 0, 0);
+			$todayLocalDay = (new DateTimeImmutable('now', app_timezone_object()))->setTime(0, 0, 0);
+			for ($cursor = $cutoffLocalDay; $cursor <= $todayLocalDay; $cursor = $cursor->add(new DateInterval('P1D'))) {
+				$key = $cursor->format('Y-m-d');
+				$heatmapRowOrder[] = $key;
+				$heatmapRowLabels[$key] = $key;
+			}
 
-	foreach ($heatmapRows as $heatmapRow) {
-		$weekdayIdx = (int) ($heatmapRow['weekday_idx'] ?? 0);
-		$hourIdx = (int) ($heatmapRow['hour_idx'] ?? -1);
-		$hits = (int) ($heatmapRow['hits'] ?? 0);
-		if (!isset($heatmapGrid[$weekdayIdx]) || $hourIdx < 0 || $hourIdx > 23) {
-			continue;
+			if ($heatmapMetric === 'estimated_visits') {
+				$heatmapFingerprintExpr = "CONCAT(COALESCE(h.ip_address, ''), '|', MD5(CONCAT(COALESCE(h.user_agent, ''), '|', COALESCE(h.accept_language, ''))))";
+				$heatmapSql =
+					"WITH ordered_hits AS (
+						SELECT
+							$localHitExpr AS local_hit_at,
+							h.hit_at,
+							LAG(h.hit_at) OVER (PARTITION BY $heatmapFingerprintExpr ORDER BY h.hit_at) AS prev_hit
+						FROM $hitTable h
+						WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc
+					)
+					SELECT DATE(local_hit_at) AS day_bucket, HOUR(local_hit_at) AS hour_idx,
+						COALESCE(SUM(CASE WHEN prev_hit IS NULL OR TIMESTAMPDIFF(MINUTE, prev_hit, hit_at) > 30 THEN 1 ELSE 0 END), 0) AS hits
+					FROM ordered_hits
+					GROUP BY day_bucket, hour_idx
+					ORDER BY day_bucket ASC, hour_idx ASC";
+			} else {
+				$heatmapSql =
+					"SELECT DATE($localHitExpr) AS day_bucket, HOUR($localHitExpr) AS hour_idx, COUNT(*) AS hits
+					 FROM $hitTable h
+					 WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc
+					 GROUP BY day_bucket, hour_idx
+					 ORDER BY day_bucket ASC, hour_idx ASC";
+			}
+		} else {
+			$heatmapMode = 'weekday_hour';
+			$heatmapRowOrder = array_keys($heatmapWeekdayLabels);
+			$heatmapRowLabels = $heatmapWeekdayLabels;
+
+			if ($heatmapMetric === 'estimated_visits') {
+				$heatmapFingerprintExpr = "CONCAT(COALESCE(h.ip_address, ''), '|', MD5(CONCAT(COALESCE(h.user_agent, ''), '|', COALESCE(h.accept_language, ''))))";
+				$heatmapSql =
+					"WITH ordered_hits AS (
+						SELECT
+							$localHitExpr AS local_hit_at,
+							h.hit_at,
+							LAG(h.hit_at) OVER (PARTITION BY $heatmapFingerprintExpr ORDER BY h.hit_at) AS prev_hit
+						FROM $hitTable h
+						WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc
+					)
+					SELECT DAYOFWEEK(local_hit_at) AS row_key, HOUR(local_hit_at) AS hour_idx,
+						COALESCE(SUM(CASE WHEN prev_hit IS NULL OR TIMESTAMPDIFF(MINUTE, prev_hit, hit_at) > 30 THEN 1 ELSE 0 END), 0) AS hits
+					FROM ordered_hits
+					GROUP BY row_key, hour_idx
+					ORDER BY row_key ASC, hour_idx ASC";
+			} else {
+				$heatmapSql =
+					"SELECT DAYOFWEEK($localHitExpr) AS row_key, HOUR($localHitExpr) AS hour_idx, COUNT(*) AS hits
+					 FROM $hitTable h
+					 WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc
+					 GROUP BY row_key, hour_idx
+					 ORDER BY row_key ASC, hour_idx ASC";
+			}
 		}
-		$heatmapGrid[$weekdayIdx][$hourIdx] = $hits;
-		if ($hits > $heatmapMaxHits) {
-			$heatmapMaxHits = $hits;
+
+		$heatmapStmt = db()->prepare($heatmapSql);
+		$heatmapStmt->bindValue(':tz_name', $appTimezoneName, PDO::PARAM_STR);
+		$heatmapStmt->bindValue(':tz_offset_minute', $appTimezoneOffsetMinutes, PDO::PARAM_INT);
+		$heatmapStmt->bindValue(':source_id', (int) $selectedSource['id'], PDO::PARAM_INT);
+		$heatmapStmt->bindValue(':cutoff_utc', $cutoffUtc, PDO::PARAM_STR);
+		$heatmapStmt->execute();
+		$heatmapRows = $heatmapStmt->fetchAll();
+
+		foreach ($heatmapRowOrder as $rowKey) {
+			$heatmapGrid[$rowKey] = [];
+			for ($hour = 0; $hour < 24; $hour++) {
+				$heatmapGrid[$rowKey][$hour] = 0;
+			}
+		}
+
+		foreach ($heatmapRows as $heatmapRow) {
+			if ($heatmapMode === 'date_hour') {
+				$rowKey = (string) ($heatmapRow['day_bucket'] ?? '');
+			} else {
+				$rowKey = (string) ((int) ($heatmapRow['row_key'] ?? 0));
+			}
+			$hourIdx = (int) ($heatmapRow['hour_idx'] ?? -1);
+			$hits = (int) ($heatmapRow['hits'] ?? 0);
+			if (!isset($heatmapGrid[$rowKey]) || $hourIdx < 0 || $hourIdx > 23) {
+				continue;
+			}
+			$heatmapGrid[$rowKey][$hourIdx] = $hits;
+			if ($hits > $heatmapMaxHits) {
+				$heatmapMaxHits = $hits;
+			}
 		}
 	}
 
@@ -558,42 +617,49 @@ render_header('Analytics');
 		<?php echo render_simple_svg_chart($timelineRows, 'hits'); ?>
 	</div>
 
-	<div class="card">
-		<h3>Time-of-Day Heatmap (<?php echo e($appTimezoneName); ?>)</h3>
-		<p class="muted"><?php echo e($sourceType === 'redirect' ? 'Click' : 'Open'); ?> concentration by weekday and hour. Metric: <?php echo e($heatmapMetric === 'estimated_visits' ? 'Estimated Visits (Balanced)' : 'Hits'); ?>. Darker cells indicate higher volume.</p>
-		<div style="width:100%;overflow-x:auto;">
-			<table style="min-width:980px;table-layout:fixed;font-size:0.78rem;">
-				<thead>
-					<tr>
-						<th style="width:56px;padding:4px 6px;">Day</th>
-						<?php for ($hour = 0; $hour < 24; $hour++): ?>
-							<th style="text-align:center;padding:4px 3px;"><?php echo e(str_pad((string) $hour, 2, '0', STR_PAD_LEFT)); ?></th>
-						<?php endfor; ?>
-					</tr>
-				</thead>
-				<tbody>
-				<?php foreach ($heatmapWeekdayLabels as $weekdayIdx => $weekdayLabel): ?>
-					<tr>
-						<td style="padding:4px 6px;"><strong><?php echo e($weekdayLabel); ?></strong></td>
-						<?php for ($hour = 0; $hour < 24; $hour++): ?>
-							<?php
-							$cellHits = (int) ($heatmapGrid[$weekdayIdx][$hour] ?? 0);
-							$intensity = $heatmapMaxHits > 0 ? ($cellHits / $heatmapMaxHits) : 0;
-							$alpha = $intensity > 0 ? (0.08 + ($intensity * 0.82)) : 0;
-							$textColor = $alpha >= 0.58 ? '#ffffff' : '#1f2937';
-							$bgColor = $cellHits > 0 ? 'rgba(31, 78, 165, ' . number_format($alpha, 3, '.', '') . ')' : 'transparent';
-							?>
-							<td style="text-align:center;padding:4px 3px;background:<?php echo e($bgColor); ?>;color:<?php echo e($textColor); ?>;font-weight:<?php echo $cellHits > 0 ? '600' : '400'; ?>;">
-								<?php echo e((string) $cellHits); ?>
-							</td>
-						<?php endfor; ?>
-					</tr>
-				<?php endforeach; ?>
-				</tbody>
-			</table>
+	<?php if ($period !== 'all'): ?>
+		<div class="card">
+			<h3>Time-of-Day Heatmap (<?php echo e($appTimezoneName); ?>)</h3>
+			<p class="muted"><?php echo e($sourceType === 'redirect' ? 'Click' : 'Open'); ?> concentration by <?php echo e($heatmapMode === 'date_hour' ? 'date and hour' : 'weekday and hour'); ?>. Metric: <?php echo e($heatmapMetric === 'estimated_visits' ? 'Estimated Visits (Balanced)' : 'Hits'); ?>. Darker cells indicate higher volume.</p>
+			<div style="width:100%;overflow-x:auto;">
+				<table style="min-width:980px;table-layout:fixed;font-size:0.78rem;">
+					<thead>
+						<tr>
+							<th style="width:<?php echo $heatmapMode === 'date_hour' ? '92px' : '56px'; ?>;padding:4px 6px;"><?php echo e($heatmapMode === 'date_hour' ? 'Date' : 'Day'); ?></th>
+							<?php for ($hour = 0; $hour < 24; $hour++): ?>
+								<th style="text-align:center;padding:4px 3px;"><?php echo e(str_pad((string) $hour, 2, '0', STR_PAD_LEFT)); ?></th>
+							<?php endfor; ?>
+						</tr>
+					</thead>
+					<tbody>
+					<?php foreach ($heatmapRowOrder as $rowKey): ?>
+						<tr>
+							<td style="padding:4px 6px;"><strong><?php echo e((string) ($heatmapRowLabels[$rowKey] ?? (string) $rowKey)); ?></strong></td>
+							<?php for ($hour = 0; $hour < 24; $hour++): ?>
+								<?php
+								$cellHits = (int) ($heatmapGrid[$rowKey][$hour] ?? 0);
+								$intensity = $heatmapMaxHits > 0 ? ($cellHits / $heatmapMaxHits) : 0;
+								$alpha = $intensity > 0 ? (0.08 + ($intensity * 0.82)) : 0;
+								$textColor = $alpha >= 0.58 ? '#ffffff' : '#1f2937';
+								$bgColor = $cellHits > 0 ? 'rgba(31, 78, 165, ' . number_format($alpha, 3, '.', '') . ')' : 'transparent';
+								?>
+								<td style="text-align:center;padding:4px 3px;background:<?php echo e($bgColor); ?>;color:<?php echo e($textColor); ?>;font-weight:<?php echo $cellHits > 0 ? '600' : '400'; ?>;">
+									<?php echo e((string) $cellHits); ?>
+								</td>
+							<?php endfor; ?>
+						</tr>
+					<?php endforeach; ?>
+					</tbody>
+				</table>
+			</div>
+			<p class="muted">Peak cell value in window: <?php echo e((string) $heatmapMaxHits); ?></p>
 		</div>
-		<p class="muted">Peak cell value in window: <?php echo e((string) $heatmapMaxHits); ?></p>
-	</div>
+	<?php else: ?>
+		<div class="card">
+			<h3>Time-of-Day Heatmap</h3>
+			<p class="muted">Hidden for All Time period. Select 24h, 7d, or 30d to view hourly concentration.</p>
+		</div>
+	<?php endif; ?>
 
 	<div class="row">
 		<div class="card">

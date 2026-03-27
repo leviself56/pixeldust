@@ -45,13 +45,12 @@ if (function_exists('mb_strlen') && mb_strlen($search) > 255) {
 } elseif (strlen($search) > 255) {
 	$search = substr($search, 0, 255);
 }
-$validPeriods = ['24h', '7d', '30d'];
+$validPeriods = ['24h', '7d', '30d', 'all'];
 if (!in_array($period, $validPeriods, true)) {
 	$period = '7d';
 }
 
 $chartBucketFormat = $period === '24h' ? 'Y-m-d H:00:00' : 'Y-m-d';
-$periodIntervalSpec = $period === '24h' ? 'PT24H' : ($period === '30d' ? 'P30D' : 'P7D');
 
 $hasRedirectTables = false;
 try {
@@ -94,9 +93,14 @@ $recentHitsTotal = 0;
 $recentHitsTotalPages = 1;
 
 if ($selectedSource) {
-	$cutoffUtc = (new DateTimeImmutable('now', new DateTimeZone('UTC')))
-		->sub(new DateInterval($periodIntervalSpec))
-		->format('Y-m-d H:i:s');
+	if ($period === 'all') {
+		$cutoffUtc = '1970-01-01 00:00:00';
+	} else {
+		$periodIntervalSpec = $period === '24h' ? 'PT24H' : ($period === '30d' ? 'P30D' : 'P7D');
+		$cutoffUtc = (new DateTimeImmutable('now', new DateTimeZone('UTC')))
+			->sub(new DateInterval($periodIntervalSpec))
+			->format('Y-m-d H:i:s');
+	}
 
 	$hitTable = $sourceType === 'redirect' ? 'pd_redirect_hits' : 'pd_pixel_hits';
 	$idColumn = $sourceType === 'redirect' ? 'redirect_id' : 'pixel_id';

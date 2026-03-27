@@ -45,7 +45,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
 	}
 
 	$postPeriod = (string) ($_POST['period'] ?? '7d');
-	$postValidPeriods = ['24h', '7d', '30d'];
+	$postValidPeriods = ['24h', '7d', '30d', 'all'];
 	if (!in_array($postPeriod, $postValidPeriods, true)) {
 		$postPeriod = '7d';
 	}
@@ -111,7 +111,7 @@ $sourceKey = $sourceType === 'redirect' ? $redirectKey : $pixelKey;
 $ipAddress = trim((string) ($_GET['ip'] ?? ''));
 $period = (string) ($_GET['period'] ?? '7d');
 $tagStatus = trim((string) ($_GET['tag_status'] ?? ''));
-$validPeriods = ['24h', '7d', '30d'];
+$validPeriods = ['24h', '7d', '30d', 'all'];
 if (!in_array($period, $validPeriods, true)) {
 	$period = '7d';
 }
@@ -120,10 +120,14 @@ if (strlen($ipAddress) > 45) {
 	$ipAddress = substr($ipAddress, 0, 45);
 }
 
-$periodIntervalSpec = $period === '24h' ? 'PT24H' : ($period === '30d' ? 'P30D' : 'P7D');
-$cutoffUtc = (new DateTimeImmutable('now', new DateTimeZone('UTC')))
-	->sub(new DateInterval($periodIntervalSpec))
-	->format('Y-m-d H:i:s');
+if ($period === 'all') {
+	$cutoffUtc = '1970-01-01 00:00:00';
+} else {
+	$periodIntervalSpec = $period === '24h' ? 'PT24H' : ($period === '30d' ? 'P30D' : 'P7D');
+	$cutoffUtc = (new DateTimeImmutable('now', new DateTimeZone('UTC')))
+		->sub(new DateInterval($periodIntervalSpec))
+		->format('Y-m-d H:i:s');
+}
 
 $hasRedirectTables = false;
 try {
