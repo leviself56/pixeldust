@@ -87,6 +87,7 @@ if ($sourceKey !== '') {
 
 $chartData = [];
 $recentHits = [];
+$ipTagMap = [];
 $recentHitsPage = max(1, (int) ($_GET['page'] ?? 1));
 $recentHitsPerPage = 100;
 $recentHitsTotal = 0;
@@ -163,6 +164,7 @@ if ($selectedSource) {
 	$recentStmt->bindValue(':limit', $recentHitsPerPage, PDO::PARAM_INT);
 	$recentStmt->execute();
 	$recentHits = $recentStmt->fetchAll();
+	$ipTagMap = fetch_ip_operator_tags(array_map(static fn(array $hit): string => (string) ($hit['ip_address'] ?? ''), $recentHits));
 }
 
 function render_svg_chart(array $rows): string
@@ -336,11 +338,12 @@ render_header('Stats');
 			<?php else: ?>
 				<?php foreach ($recentHits as $hit): ?>
 					<?php $hitIp = (string) ($hit['ip_address'] ?? ''); ?>
+					<?php $hitIpLabel = format_ip_with_operator_tag($hitIp, $ipTagMap[$hitIp] ?? null); ?>
 					<tr>
 						<td style="word-break:break-word;"><?php echo e(format_db_datetime((string) ($hit['hit_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
 						<td>
 							<?php if ($hitIp !== ''): ?>
-								<a href="ip-details.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode((string) $selectedSource['source_key']) : '&pixel_key=' . urlencode((string) $selectedSource['source_key']); ?>&ip=<?php echo urlencode($hitIp); ?>&period=<?php echo urlencode($period); ?>"><?php echo e($hitIp); ?></a>
+								<a href="ip-details.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode((string) $selectedSource['source_key']) : '&pixel_key=' . urlencode((string) $selectedSource['source_key']); ?>&ip=<?php echo urlencode($hitIp); ?>&period=<?php echo urlencode($period); ?>"><?php echo e($hitIpLabel); ?></a>
 							<?php else: ?>
 								-
 							<?php endif; ?>

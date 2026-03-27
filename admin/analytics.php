@@ -94,6 +94,8 @@ $sourceKey = $sourceType === 'redirect' ? $redirectKey : $pixelKey;
 $period = (string) ($_GET['period'] ?? '7d');
 $heatmapMetric = trim((string) ($_GET['heatmap_metric'] ?? 'estimated_visits'));
 $providerFilter = trim((string) ($_GET['provider'] ?? ''));
+$providerPage = max(1, (int) ($_GET['provider_page'] ?? 1));
+$providerIpsPerPage = 25;
 $validHeatmapMetrics = ['hits', 'estimated_visits'];
 if (!in_array($heatmapMetric, $validHeatmapMetrics, true)) {
 	$heatmapMetric = 'hits';
@@ -158,6 +160,9 @@ $clientMix = [];
 $timelineRows = [];
 $topIps = [];
 $providerIps = [];
+$providerIpsTotal = 0;
+$providerIpsTotalPages = 1;
+$ipTagMap = [];
 $providerLookupError = '';
 $heatmapRows = [];
 $heatmapGrid = [];
@@ -274,6 +279,30 @@ if ($selectedSource) {
 
 	if ($providerFilter !== '') {
 		try {
+			$providerCountSql =
+				"SELECT COUNT(*) AS total_ips FROM (
+					SELECT h.ip_address
+					FROM $hitTable h
+					$joinClassification
+					$joinEnrichment
+					WHERE h.$idColumn = :source_id
+					  AND h.hit_at >= :cutoff_utc
+					  AND ($ispExpr) = :provider
+					GROUP BY h.ip_address
+				) provider_rows";
+			$providerCountStmt = db()->prepare($providerCountSql);
+			$providerCountStmt->execute([
+				'source_id' => (int) $selectedSource['id'],
+				'cutoff_utc' => $cutoffUtc,
+				'provider' => $providerFilter,
+			]);
+			$providerIpsTotal = (int) (($providerCountStmt->fetch()['total_ips'] ?? 0));
+			$providerIpsTotalPages = max(1, (int) ceil($providerIpsTotal / $providerIpsPerPage));
+			if ($providerPage > $providerIpsTotalPages) {
+				$providerPage = $providerIpsTotalPages;
+			}
+			$providerOffset = ($providerPage - 1) * $providerIpsPerPage;
+
 			$providerIpsSql =
 				"SELECT h.ip_address, COUNT(*) AS hits, MAX(h.hit_at) AS last_seen
 				 FROM $hitTable h
@@ -284,16 +313,19 @@ if ($selectedSource) {
 				   AND ($ispExpr) = :provider
 				 GROUP BY h.ip_address
 				 ORDER BY hits DESC, last_seen DESC
-				 LIMIT 200";
+				 LIMIT :limit OFFSET :offset";
 			$providerIpsStmt = db()->prepare($providerIpsSql);
-			$providerIpsStmt->execute([
-				'source_id' => (int) $selectedSource['id'],
-				'cutoff_utc' => $cutoffUtc,
-				'provider' => $providerFilter,
-			]);
+			$providerIpsStmt->bindValue(':source_id', (int) $selectedSource['id'], PDO::PARAM_INT);
+			$providerIpsStmt->bindValue(':cutoff_utc', $cutoffUtc, PDO::PARAM_STR);
+			$providerIpsStmt->bindValue(':provider', $providerFilter, PDO::PARAM_STR);
+			$providerIpsStmt->bindValue(':limit', $providerIpsPerPage, PDO::PARAM_INT);
+			$providerIpsStmt->bindValue(':offset', $providerOffset, PDO::PARAM_INT);
+			$providerIpsStmt->execute();
 			$providerIps = $providerIpsStmt->fetchAll();
 		} catch (Throwable $e) {
 			$providerIps = [];
+			$providerIpsTotal = 0;
+			$providerIpsTotalPages = 1;
 			$providerLookupError = 'Unable to load provider drilldown right now.';
 		}
 	}
@@ -419,6 +451,15 @@ if ($selectedSource) {
 		'cutoff_utc' => $cutoffUtc,
 	]);
 	$topIps = $ipStmt->fetchAll();
+
+	$ipTagLookupList = [];
+	foreach ($topIps as $row) {
+		$ipTagLookupList[] = (string) ($row['ip_address'] ?? '');
+	}
+	foreach ($providerIps as $row) {
+		$ipTagLookupList[] = (string) ($row['ip_address'] ?? '');
+	}
+	$ipTagMap = fetch_ip_operator_tags($ipTagLookupList);
 }
 
 $displayName = $sourceType === 'redirect' ? 'Redirect Analytics' : 'Pixel Analytics';
@@ -623,6 +664,11 @@ render_header('Analytics');
 			?>
 			<h3>Provider Drilldown: <?php echo e($providerFilter); ?></h3>
 			<p class="muted">IPs that matched this provider in the selected window. <a href="<?php echo e('analytics.php?' . http_build_query($clearProviderParams)); ?>">Clear provider filter</a></p>
+			<?php if ($providerLookupError === ''): ?>
+				<p class="muted">Showing <?php echo e((string) ($providerIpsTotal === 0 ? 0 : (($providerPage - 1) * $providerIpsPerPage + 1))); ?>-
+					<?php echo e((string) min($providerPage * $providerIpsPerPage, $providerIpsTotal)); ?> of
+					<?php echo e((string) $providerIpsTotal); ?> IPs</p>
+			<?php endif; ?>
 			<?php if ($providerLookupError !== ''): ?>
 				<div class="error"><?php echo e($providerLookupError); ?></div>
 			<?php endif; ?>
@@ -635,6 +681,7 @@ render_header('Analytics');
 					<?php foreach ($providerIps as $row): ?>
 						<?php
 						$providerIpValue = (string) ($row['ip_address'] ?? '');
+						$providerIpLabel = format_ip_with_operator_tag($providerIpValue, $ipTagMap[$providerIpValue] ?? null);
 						$providerIpDetailsParams = [
 							'source_type' => $sourceType,
 							'period' => $period,
@@ -648,7 +695,7 @@ render_header('Analytics');
 						$providerIpDetailsHref = 'ip-details.php?' . http_build_query($providerIpDetailsParams);
 						?>
 						<tr>
-							<td><a href="<?php echo e($providerIpDetailsHref); ?>"><?php echo e($providerIpValue); ?></a></td>
+							<td><a href="<?php echo e($providerIpDetailsHref); ?>"><?php echo e($providerIpLabel); ?></a></td>
 							<td><?php echo e((string) ((int) ($row['hits'] ?? 0))); ?></td>
 							<td><?php echo e((string) ($row['last_seen'] ?? '')); ?></td>
 						</tr>
@@ -656,6 +703,32 @@ render_header('Analytics');
 				<?php endif; ?>
 				</tbody>
 			</table>
+			<?php if ($providerLookupError === '' && $providerIpsTotalPages > 1): ?>
+				<?php
+				$providerPageParams = [
+					'source_type' => $sourceType,
+					'period' => $period,
+					'heatmap_metric' => $heatmapMetric,
+					'provider' => $providerFilter,
+				];
+				if ($sourceType === 'redirect') {
+					$providerPageParams['redirect_key'] = (string) $selectedSource['source_key'];
+				} else {
+					$providerPageParams['pixel_key'] = (string) $selectedSource['source_key'];
+				}
+				?>
+				<div class="inline" style="margin-top:10px;gap:10px;">
+					<?php if ($providerPage > 1): ?>
+						<?php $providerPageParams['provider_page'] = $providerPage - 1; ?>
+						<a href="<?php echo e('analytics.php?' . http_build_query($providerPageParams)); ?>">&laquo; Prev</a>
+					<?php endif; ?>
+					<span class="muted">Page <?php echo e((string) $providerPage); ?> of <?php echo e((string) $providerIpsTotalPages); ?></span>
+					<?php if ($providerPage < $providerIpsTotalPages): ?>
+						<?php $providerPageParams['provider_page'] = $providerPage + 1; ?>
+						<a href="<?php echo e('analytics.php?' . http_build_query($providerPageParams)); ?>">Next &raquo;</a>
+					<?php endif; ?>
+				</div>
+			<?php endif; ?>
 		</div>
 	<?php endif; ?>
 
@@ -702,8 +775,12 @@ render_header('Analytics');
 				<tr><td colspan="2" class="muted">No data.</td></tr>
 			<?php else: ?>
 				<?php foreach ($topIps as $row): ?>
+					<?php
+					$topIpValue = (string) ($row['ip_address'] ?? '');
+					$topIpLabel = format_ip_with_operator_tag($topIpValue, $ipTagMap[$topIpValue] ?? null);
+					?>
 					<tr>
-						<td><a href="ip-details.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode((string) $selectedSource['source_key']) : '&pixel_key=' . urlencode((string) $selectedSource['source_key']); ?>&ip=<?php echo urlencode((string) ($row['ip_address'] ?? '')); ?>&period=<?php echo urlencode($period); ?>"><?php echo e((string) ($row['ip_address'] ?? '')); ?></a></td>
+						<td><a href="ip-details.php?source_type=<?php echo urlencode($sourceType); ?><?php echo $sourceType === 'redirect' ? '&redirect_key=' . urlencode((string) $selectedSource['source_key']) : '&pixel_key=' . urlencode((string) $selectedSource['source_key']); ?>&ip=<?php echo urlencode($topIpValue); ?>&period=<?php echo urlencode($period); ?>"><?php echo e($topIpLabel); ?></a></td>
 						<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
 					</tr>
 				<?php endforeach; ?>

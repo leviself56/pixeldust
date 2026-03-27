@@ -30,6 +30,76 @@ if ($token !== '' && !current_admin()) {
 
 require_admin();
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') === 'save_ip_tag') {
+	$postSourceType = trim((string) ($_POST['source_type'] ?? 'pixel'));
+	if (!in_array($postSourceType, ['pixel', 'redirect'], true)) {
+		$postSourceType = 'pixel';
+	}
+
+	$postPixelKey = trim((string) ($_POST['pixel_key'] ?? ''));
+	$postRedirectKey = trim((string) ($_POST['redirect_key'] ?? ''));
+	$postSourceKey = $postSourceType === 'redirect' ? $postRedirectKey : $postPixelKey;
+	$postIpAddress = trim((string) ($_POST['ip'] ?? ''));
+	if (strlen($postIpAddress) > 45) {
+		$postIpAddress = substr($postIpAddress, 0, 45);
+	}
+
+	$postPeriod = (string) ($_POST['period'] ?? '7d');
+	$postValidPeriods = ['24h', '7d', '30d'];
+	if (!in_array($postPeriod, $postValidPeriods, true)) {
+		$postPeriod = '7d';
+	}
+
+	$postTagValue = trim((string) ($_POST['operator_tag'] ?? ''));
+	if (strlen($postTagValue) > 191) {
+		$postTagValue = substr($postTagValue, 0, 191);
+	}
+
+	$redirectParams = [
+		'source_type' => $postSourceType,
+		'period' => $postPeriod,
+		'ip' => $postIpAddress,
+	];
+	if ($postSourceType === 'redirect') {
+		$redirectParams['redirect_key'] = $postSourceKey;
+	} else {
+		$redirectParams['pixel_key'] = $postSourceKey;
+	}
+
+	if ($postIpAddress === '' || filter_var($postIpAddress, FILTER_VALIDATE_IP) === false) {
+		$redirectParams['tag_status'] = 'invalid_ip';
+		redirect('ip-details.php?' . http_build_query($redirectParams));
+	}
+
+	try {
+		$status = analytics_table_status();
+		if (!(bool) ($status['ip_enrichment'] ?? false)) {
+			$redirectParams['tag_status'] = 'migration_required';
+			redirect('ip-details.php?' . http_build_query($redirectParams));
+		}
+
+		$saveStmt = db()->prepare(
+			'INSERT INTO pd_ip_enrichment (ip_address, operator_tag, source, confidence, updated_at)
+			 VALUES (:ip_address, :operator_tag, "operator", 1.000, NOW())
+			 ON DUPLICATE KEY UPDATE
+				operator_tag = VALUES(operator_tag),
+				updated_at = NOW()'
+		);
+		$saveStmt->bindValue(':ip_address', $postIpAddress, PDO::PARAM_STR);
+		if ($postTagValue === '') {
+			$saveStmt->bindValue(':operator_tag', null, PDO::PARAM_NULL);
+		} else {
+			$saveStmt->bindValue(':operator_tag', $postTagValue, PDO::PARAM_STR);
+		}
+		$saveStmt->execute();
+		$redirectParams['tag_status'] = 'saved';
+	} catch (Throwable $e) {
+		$redirectParams['tag_status'] = 'error';
+	}
+
+	redirect('ip-details.php?' . http_build_query($redirectParams));
+}
+
 $sourceType = trim((string) ($_GET['source_type'] ?? 'pixel'));
 if (!in_array($sourceType, ['pixel', 'redirect'], true)) {
 	$sourceType = 'pixel';
@@ -40,6 +110,7 @@ $redirectKey = trim((string) ($_GET['redirect_key'] ?? ''));
 $sourceKey = $sourceType === 'redirect' ? $redirectKey : $pixelKey;
 $ipAddress = trim((string) ($_GET['ip'] ?? ''));
 $period = (string) ($_GET['period'] ?? '7d');
+$tagStatus = trim((string) ($_GET['tag_status'] ?? ''));
 $validPeriods = ['24h', '7d', '30d'];
 if (!in_array($period, $validPeriods, true)) {
 	$period = '7d';
@@ -103,6 +174,14 @@ $timelineRows = [];
 $clientRows = [];
 $crossSourceRows = [];
 $recentRows = [];
+$ipOperatorTag = '';
+$ipDisplayLabel = $ipAddress;
+
+if ($ipAddress !== '' && filter_var($ipAddress, FILTER_VALIDATE_IP) !== false) {
+	$singleIpTagMap = fetch_ip_operator_tags([$ipAddress]);
+	$ipOperatorTag = trim((string) ($singleIpTagMap[$ipAddress] ?? ''));
+	$ipDisplayLabel = format_ip_with_operator_tag($ipAddress, $ipOperatorTag);
+}
 
 if ($selectedSource && $ipAddress !== '') {
 	$hitTable = $sourceType === 'redirect' ? 'pd_redirect_hits' : 'pd_pixel_hits';
@@ -168,6 +247,10 @@ if ($selectedSource && $ipAddress !== '') {
 			$geo = ensure_ip_enrichment($ipAddress, true);
 		} catch (Throwable $e) {
 			$geo = null;
+		}
+		if ($ipOperatorTag === '') {
+			$ipOperatorTag = trim((string) ($geo['operator_tag'] ?? ''));
+			$ipDisplayLabel = format_ip_with_operator_tag($ipAddress, $ipOperatorTag);
 		}
 	}
 
@@ -376,9 +459,19 @@ render_header('IP Drilldown');
 	<div class="error">Enter an IP address to load details.</div>
 <?php endif; ?>
 
+<?php if ($tagStatus === 'saved'): ?>
+	<div class="card"><p class="muted">IP tag updated.</p></div>
+<?php elseif ($tagStatus === 'invalid_ip'): ?>
+	<div class="error">Invalid IP address. Tag was not saved.</div>
+<?php elseif ($tagStatus === 'migration_required'): ?>
+	<div class="error">IP enrichment table is missing. Run <a href="../migrate.php">migrations</a> to enable IP tags.</div>
+<?php elseif ($tagStatus === 'error'): ?>
+	<div class="error">Unable to save IP tag right now. Please try again.</div>
+<?php endif; ?>
+
 <?php if ($selectedSource && $ipAddress !== ''): ?>
 	<div class="card">
-		<h2>IP: <?php echo e($ipAddress); ?></h2>
+		<h2>IP: <?php echo e($ipDisplayLabel); ?></h2>
 		<p class="muted">Source: <?php echo e((string) $selectedSource['source_key']); ?> | Period: <?php echo e($period); ?> | UTC Window start: <?php echo e($cutoffUtc); ?></p>
 	</div>
 
@@ -408,6 +501,24 @@ render_header('IP Drilldown');
 				<tr><th>Proxy</th><td><?php echo ((int) ($geo['is_proxy'] ?? 0) === 1) ? 'Yes' : 'No'; ?></td></tr>
 				<tr><th>Hosting</th><td><?php echo ((int) ($geo['is_hosting'] ?? 0) === 1) ? 'Yes' : 'No'; ?></td></tr>
 				<tr><th>Source</th><td><?php echo e((string) ($geo['source'] ?? '-')); ?></td></tr>
+				<tr>
+					<th>Tag</th>
+					<td>
+						<form method="post" class="inline" style="gap:8px;align-items:center;flex-wrap:wrap;">
+							<input type="hidden" name="action" value="save_ip_tag">
+							<input type="hidden" name="source_type" value="<?php echo e($sourceType); ?>">
+							<?php if ($sourceType === 'redirect'): ?>
+								<input type="hidden" name="redirect_key" value="<?php echo e((string) $selectedSource['source_key']); ?>">
+							<?php else: ?>
+								<input type="hidden" name="pixel_key" value="<?php echo e((string) $selectedSource['source_key']); ?>">
+							<?php endif; ?>
+							<input type="hidden" name="ip" value="<?php echo e($ipAddress); ?>">
+							<input type="hidden" name="period" value="<?php echo e($period); ?>">
+							<input type="text" name="operator_tag" value="<?php echo e($ipOperatorTag); ?>" maxlength="191" placeholder="Example: Levi" style="width:220px;max-width:100%;">
+							<button type="submit">Save</button>
+						</form>
+					</td>
+				</tr>
 				</tbody>
 			</table>
 		</div>

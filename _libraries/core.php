@@ -125,6 +125,70 @@ function e(string $value): string
 	return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
 }
 
+function fetch_ip_operator_tags(array $ipAddresses): array
+{
+	$normalized = [];
+	foreach ($ipAddresses as $ipAddress) {
+		$ip = trim((string) $ipAddress);
+		if ($ip === '' || strlen($ip) > 45 || filter_var($ip, FILTER_VALIDATE_IP) === false) {
+			continue;
+		}
+		$normalized[$ip] = true;
+	}
+
+	$ips = array_keys($normalized);
+	if (!$ips) {
+		return [];
+	}
+
+	$status = analytics_table_status();
+	if (!(bool) ($status['ip_enrichment'] ?? false)) {
+		return [];
+	}
+
+	$placeholders = implode(', ', array_fill(0, count($ips), '?'));
+	try {
+		$stmt = db()->prepare(
+			"SELECT ip_address, operator_tag
+			 FROM pd_ip_enrichment
+			 WHERE ip_address IN ($placeholders)
+			   AND operator_tag IS NOT NULL
+			   AND TRIM(operator_tag) <> ''"
+		);
+		$stmt->execute($ips);
+		$rows = $stmt->fetchAll();
+	} catch (Throwable $e) {
+		return [];
+	}
+
+	$tags = [];
+	foreach ($rows as $row) {
+		$ip = trim((string) ($row['ip_address'] ?? ''));
+		$tag = trim((string) ($row['operator_tag'] ?? ''));
+		if ($ip === '' || $tag === '') {
+			continue;
+		}
+		$tags[$ip] = $tag;
+	}
+
+	return $tags;
+}
+
+function format_ip_with_operator_tag(string $ipAddress, ?string $operatorTag): string
+{
+	$ip = trim($ipAddress);
+	$tag = trim((string) $operatorTag);
+	if ($ip === '') {
+		return '';
+	}
+
+	if ($tag === '') {
+		return $ip;
+	}
+
+	return $ip . ' (' . $tag . ')';
+}
+
 function redirect(string $path): void
 {
 	header('Location: ' . $path);
@@ -415,6 +479,7 @@ function run_schema_migrations(PDO $pdo): array
 		$pdo->exec(
 			'CREATE TABLE pd_ip_enrichment (
 				ip_address VARCHAR(45) PRIMARY KEY,
+				operator_tag VARCHAR(191) NULL,
 				country_code CHAR(2) NULL,
 				region VARCHAR(120) NULL,
 				city VARCHAR(120) NULL,
@@ -614,6 +679,7 @@ function run_schema_migrations(PDO $pdo): array
 	}
 
 	$ipEnrichmentColumns = [
+		'operator_tag' => 'ALTER TABLE pd_ip_enrichment ADD COLUMN operator_tag VARCHAR(191) NULL AFTER ip_address',
 		'country_code' => 'ALTER TABLE pd_ip_enrichment ADD COLUMN country_code CHAR(2) NULL AFTER ip_address',
 		'region' => 'ALTER TABLE pd_ip_enrichment ADD COLUMN region VARCHAR(120) NULL AFTER country_code',
 		'city' => 'ALTER TABLE pd_ip_enrichment ADD COLUMN city VARCHAR(120) NULL AFTER region',
@@ -1179,10 +1245,191 @@ function infer_traffic_type(array $hit, array $enrichment, string $emailClient):
 	return 'human';
 }
 
+function evaluate_ip_bot_tag_confidence(string $ipAddress): array
+{
+	$result = [
+		'score' => 0,
+		'total_hits' => 0,
+		'bot_hits' => 0,
+		'proxy_hits' => 0,
+		'email_proxy_hits' => 0,
+		'should_tag' => false,
+	];
+
+	$ipAddress = trim($ipAddress);
+	if ($ipAddress === '' || filter_var($ipAddress, FILTER_VALIDATE_IP) === false) {
+		return $result;
+	}
+
+	$status = analytics_table_status();
+	$subQueries = [];
+	$params = [];
+
+	if ((bool) ($status['hit_classification'] ?? false)) {
+		$subQueries[] =
+			"SELECT traffic_type, email_client_guess
+			 FROM pd_hit_classification
+			 WHERE ip_address = :pixel_ip
+			   AND classified_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)";
+		$params['pixel_ip'] = $ipAddress;
+	}
+
+	if ((bool) ($status['redirect_hit_classification'] ?? false)) {
+		$subQueries[] =
+			"SELECT traffic_type, email_client_guess
+			 FROM pd_redirect_hit_classification
+			 WHERE ip_address = :redirect_ip
+			   AND classified_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)";
+		$params['redirect_ip'] = $ipAddress;
+	}
+
+	if (!$subQueries) {
+		return $result;
+	}
+
+	$classificationUnionSql = implode(' UNION ALL ', $subQueries);
+
+	try {
+		$aggStmt = db()->prepare(
+			"SELECT
+				COUNT(*) AS total_hits,
+				SUM(CASE WHEN traffic_type = 'bot' THEN 1 ELSE 0 END) AS bot_hits,
+				SUM(CASE WHEN traffic_type = 'proxy' THEN 1 ELSE 0 END) AS proxy_hits,
+				SUM(CASE WHEN email_client_guess IN ('gmail', 'yahoo_mail', 'outlook_family', 'other_webmail') THEN 1 ELSE 0 END) AS email_proxy_hits
+			 FROM ($classificationUnionSql) classified"
+		);
+		$aggStmt->execute($params);
+		$agg = (array) $aggStmt->fetch();
+	} catch (Throwable $e) {
+		return $result;
+	}
+
+	$totalHits = (int) ($agg['total_hits'] ?? 0);
+	$botHits = (int) ($agg['bot_hits'] ?? 0);
+	$proxyHits = (int) ($agg['proxy_hits'] ?? 0);
+	$emailProxyHits = (int) ($agg['email_proxy_hits'] ?? 0);
+
+	$result['total_hits'] = $totalHits;
+	$result['bot_hits'] = $botHits;
+	$result['proxy_hits'] = $proxyHits;
+	$result['email_proxy_hits'] = $emailProxyHits;
+
+	if ($totalHits < 12) {
+		return $result;
+	}
+
+	$botRatio = $totalHits > 0 ? ($botHits / $totalHits) : 0.0;
+	$proxyRatio = $totalHits > 0 ? ($proxyHits / $totalHits) : 0.0;
+	$emailRatio = $totalHits > 0 ? ($emailProxyHits / $totalHits) : 0.0;
+
+	$score = 0;
+	if ($botRatio >= 0.95) {
+		$score += 55;
+	} elseif ($botRatio >= 0.90) {
+		$score += 45;
+	} elseif ($botRatio >= 0.85) {
+		$score += 35;
+	}
+
+	if ($botHits >= 60) {
+		$score += 25;
+	} elseif ($botHits >= 30) {
+		$score += 20;
+	} elseif ($botHits >= 15) {
+		$score += 12;
+	}
+
+	if ($proxyRatio <= 0.10) {
+		$score += 12;
+	} elseif ($proxyRatio <= 0.20) {
+		$score += 8;
+	} elseif ($proxyRatio <= 0.30) {
+		$score += 4;
+	}
+
+	if ($emailRatio <= 0.03) {
+		$score += 18;
+	} elseif ($emailRatio <= 0.08) {
+		$score += 10;
+	} elseif ($emailRatio <= 0.12) {
+		$score += 4;
+	}
+
+	$shouldTag =
+		$score >= 80 &&
+		$botHits >= 15 &&
+		$botRatio >= 0.85 &&
+		$emailProxyHits <= max(1, (int) floor($totalHits * 0.08));
+
+	$result['score'] = $score;
+	$result['should_tag'] = $shouldTag;
+
+	return $result;
+}
+
+function auto_tag_ip_as_bot_if_confident(string $ipAddress): bool
+{
+	$ipAddress = trim($ipAddress);
+	if ($ipAddress === '' || filter_var($ipAddress, FILTER_VALIDATE_IP) === false) {
+		return false;
+	}
+
+	$status = analytics_table_status();
+	if (!(bool) ($status['ip_enrichment'] ?? false)) {
+		return false;
+	}
+
+	try {
+		$currentStmt = db()->prepare('SELECT operator_tag FROM pd_ip_enrichment WHERE ip_address = :ip_address LIMIT 1');
+		$currentStmt->execute(['ip_address' => $ipAddress]);
+		$current = $currentStmt->fetch();
+		$currentTag = strtolower(trim((string) ($current['operator_tag'] ?? '')));
+		if ($currentTag !== '' && $currentTag !== 'bot') {
+			return false;
+		}
+	} catch (Throwable $e) {
+		return false;
+	}
+
+	$assessment = evaluate_ip_bot_tag_confidence($ipAddress);
+	if (!(bool) ($assessment['should_tag'] ?? false)) {
+		return false;
+	}
+
+	try {
+		$tagStmt = db()->prepare(
+			'INSERT INTO pd_ip_enrichment (ip_address, operator_tag, source, confidence, updated_at)
+			 VALUES (:ip_address, "bot", "bot_auto", 0.980, NOW())
+			 ON DUPLICATE KEY UPDATE
+				operator_tag = CASE
+					WHEN operator_tag IS NULL OR TRIM(operator_tag) = "" OR LOWER(TRIM(operator_tag)) = "bot"
+					THEN "bot"
+					ELSE operator_tag
+				END,
+				source = CASE
+					WHEN operator_tag IS NULL OR TRIM(operator_tag) = "" OR LOWER(TRIM(operator_tag)) = "bot"
+					THEN "bot_auto"
+					ELSE source
+				END,
+				confidence = CASE
+					WHEN operator_tag IS NULL OR TRIM(operator_tag) = "" OR LOWER(TRIM(operator_tag)) = "bot"
+					THEN 0.980
+					ELSE confidence
+				END,
+				updated_at = NOW()'
+		);
+		$tagStmt->execute(['ip_address' => $ipAddress]);
+		return true;
+	} catch (Throwable $e) {
+		return false;
+	}
+}
+
 function lookup_ip_enrichment_remote(string $ipAddress): array
 {
 	$default = [
 		'ip_address' => $ipAddress,
+		'operator_tag' => null,
 		'country_code' => null,
 		'region' => null,
 		'city' => null,
@@ -2518,6 +2765,7 @@ function process_ip_enrichment_queue(int $maxRows = 100, int $maxRuntimeSeconds 
 			'processed' => 0,
 			'succeeded' => 0,
 			'failed' => 0,
+			'auto_bot_tagged' => 0,
 			'locked' => false,
 			'access_log' => [
 				'enabled' => false,
@@ -2536,12 +2784,13 @@ function process_ip_enrichment_queue(int $maxRows = 100, int $maxRuntimeSeconds 
 	$lockStmt->execute(['lock_name' => 'pixeldust_ip_enrichment_worker']);
 	$gotLock = (int) ($lockStmt->fetch()['got_lock'] ?? 0) === 1;
 	if (!$gotLock) {
-		return ['processed' => 0, 'succeeded' => 0, 'failed' => 0, 'locked' => true];
+		return ['processed' => 0, 'succeeded' => 0, 'failed' => 0, 'auto_bot_tagged' => 0, 'locked' => true];
 	}
 
 	$processed = 0;
 	$succeeded = 0;
 	$failed = 0;
+	$autoBotTagged = 0;
 	$accessLogResult = [
 		'enabled' => false,
 		'processed_lines' => 0,
@@ -2598,6 +2847,9 @@ function process_ip_enrichment_queue(int $maxRows = 100, int $maxRuntimeSeconds 
 						$resolvedHost = ensure_reverse_host_for_ip($ipAddress, true);
 						if ($resolvedHost !== null && $resolvedHost !== '') {
 							backfill_remote_host_for_ip_hits($ipAddress, $resolvedHost, 250);
+						}
+						if (auto_tag_ip_as_bot_if_confident($ipAddress)) {
+							$autoBotTagged++;
 						}
 
 						if ($source !== 'unresolved') {
@@ -2659,6 +2911,7 @@ function process_ip_enrichment_queue(int $maxRows = 100, int $maxRuntimeSeconds 
 		'processed' => $processed,
 		'succeeded' => $succeeded,
 		'failed' => $failed,
+		'auto_bot_tagged' => $autoBotTagged,
 		'locked' => false,
 		'access_log' => $accessLogResult,
 	];
