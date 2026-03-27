@@ -633,8 +633,22 @@ render_header('Analytics');
 					<tr><td colspan="3" class="muted">No IPs matched this provider in the selected period.</td></tr>
 				<?php else: ?>
 					<?php foreach ($providerIps as $row): ?>
+						<?php
+						$providerIpValue = (string) ($row['ip_address'] ?? '');
+						$providerIpDetailsParams = [
+							'source_type' => $sourceType,
+							'period' => $period,
+							'ip' => $providerIpValue,
+						];
+						if ($sourceType === 'redirect') {
+							$providerIpDetailsParams['redirect_key'] = (string) $selectedSource['source_key'];
+						} else {
+							$providerIpDetailsParams['pixel_key'] = (string) $selectedSource['source_key'];
+						}
+						$providerIpDetailsHref = 'ip-details.php?' . http_build_query($providerIpDetailsParams);
+						?>
 						<tr>
-							<td><?php echo e((string) ($row['ip_address'] ?? '')); ?></td>
+							<td><a href="<?php echo e($providerIpDetailsHref); ?>"><?php echo e($providerIpValue); ?></a></td>
 							<td><?php echo e((string) ((int) ($row['hits'] ?? 0))); ?></td>
 							<td><?php echo e((string) ($row['last_seen'] ?? '')); ?></td>
 						</tr>

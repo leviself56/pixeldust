@@ -488,8 +488,21 @@ render_header('IP Drilldown');
 				<tr><td colspan="5" class="muted">No data.</td></tr>
 			<?php else: ?>
 				<?php foreach ($crossSourceRows as $row): ?>
+						<?php
+						$crossSourceKey = (string) ($row['source_key'] ?? '');
+						$crossSourceStatsParams = [
+							'source_type' => $sourceType,
+							'period' => $period,
+						];
+						if ($sourceType === 'redirect') {
+							$crossSourceStatsParams['redirect_key'] = $crossSourceKey;
+						} else {
+							$crossSourceStatsParams['pixel_key'] = $crossSourceKey;
+						}
+						$crossSourceStatsHref = 'stats.php?' . http_build_query($crossSourceStatsParams);
+						?>
 					<tr>
-						<td><?php echo e((string) ($row['source_key'] ?? '')); ?></td>
+							<td><a href="<?php echo e($crossSourceStatsHref); ?>"><?php echo e($crossSourceKey); ?></a></td>
 						<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
 						<td><?php echo e(format_db_datetime((string) ($row['first_seen'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
 						<td><?php echo e(format_db_datetime((string) ($row['last_seen'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
