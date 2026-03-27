@@ -89,6 +89,7 @@ if ($sourceKey !== '') {
 $tableStatus = analytics_table_status();
 $summary = [
 	'hits' => 0,
+	'estimated_visits_balanced' => 0,
 	'first_seen' => null,
 	'last_seen' => null,
 	'active_days' => 0,
@@ -196,6 +197,28 @@ if ($selectedSource && $ipAddress !== '') {
 		'cutoff_utc' => $cutoffUtc,
 	]);
 	$summary = array_merge($summary, (array) $summaryStmt->fetch());
+
+	$balancedVisitsSql =
+		"WITH ordered_hits AS (
+			SELECT
+				h.hit_at,
+				LAG(h.hit_at) OVER (
+					PARTITION BY CONCAT(COALESCE(h.ip_address, ''), '|', MD5(CONCAT(COALESCE(h.user_agent, ''), '|', COALESCE(h.accept_language, ''))))
+					ORDER BY h.hit_at
+				) AS prev_hit
+			FROM $hitTable h
+			WHERE h.$idColumn = :source_id AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+		)
+		SELECT COALESCE(SUM(CASE WHEN prev_hit IS NULL OR TIMESTAMPDIFF(MINUTE, prev_hit, hit_at) > 30 THEN 1 ELSE 0 END), 0) AS estimated_visits_balanced
+		FROM ordered_hits";
+	$balancedVisitsStmt = db()->prepare($balancedVisitsSql);
+	$balancedVisitsStmt->execute([
+		'source_id' => (int) $selectedSource['id'],
+		'ip_address' => $ipAddress,
+		'cutoff_utc' => $cutoffUtc,
+	]);
+	$balancedVisitsRow = (array) $balancedVisitsStmt->fetch();
+	$summary['estimated_visits_balanced'] = (int) ($balancedVisitsRow['estimated_visits_balanced'] ?? 0);
 
 	$timelineSql =
 		"SELECT DATE(h.hit_at) AS bucket, COUNT(*) AS hits
@@ -362,7 +385,7 @@ render_header('IP Drilldown');
 	<div class="row">
 		<div class="card"><h3>Hits</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['hits'] ?? 0))); ?></p></div>
 		<div class="card"><h3>Active Days</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['active_days'] ?? 0))); ?></p></div>
-		<div class="card"><h3>Unique Referrers</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['unique_ref_domains'] ?? 0))); ?></p></div>
+		<div class="card"><h3>Estimated Visits</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['estimated_visits_balanced'] ?? 0))); ?></p></div>
 		<div class="card"><h3>User Agent Variants</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['unique_user_agents'] ?? 0))); ?></p></div>
 	</div>
 

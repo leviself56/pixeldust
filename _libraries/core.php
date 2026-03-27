@@ -1382,11 +1382,415 @@ function try_start_ip_enrichment_worker(int $minSpawnIntervalSeconds = 30): bool
 	return true;
 }
 
+function analytics_access_log_path(): ?string
+{
+	$app = app_config()['app'] ?? [];
+	$analytics = app_config()['analytics'] ?? [];
+	$path = trim((string) ($app['access_log_path'] ?? $analytics['access_log_path'] ?? app_config()['access_log_path'] ?? ''));
+	if ($path === '') {
+		return null;
+	}
+
+	if (!is_file($path) || !is_readable($path)) {
+		return null;
+	}
+
+	return $path;
+}
+
+function analytics_access_log_max_lines_per_run(): int
+{
+	$app = app_config()['app'] ?? [];
+	$analytics = app_config()['analytics'] ?? [];
+	$raw = $app['access_log_max_lines_per_run'] ?? $analytics['access_log_max_lines_per_run'] ?? app_config()['access_log_max_lines_per_run'] ?? 1200;
+	$limit = (int) $raw;
+	if ($limit < 100) {
+		$limit = 100;
+	}
+	if ($limit > 20000) {
+		$limit = 20000;
+	}
+
+	return $limit;
+}
+
+function analytics_access_log_cursor_path(string $logPath): string
+{
+	return rtrim(sys_get_temp_dir(), '/') . '/pixeldust_access_log_' . md5($logPath) . '.cursor.json';
+}
+
+function load_access_log_cursor(string $logPath): array
+{
+	$cursorPath = analytics_access_log_cursor_path($logPath);
+	if (!is_file($cursorPath) || !is_readable($cursorPath)) {
+		return ['inode' => 0, 'offset' => 0];
+	}
+
+	$json = @file_get_contents($cursorPath);
+	if (!is_string($json) || trim($json) === '') {
+		return ['inode' => 0, 'offset' => 0];
+	}
+
+	$decoded = json_decode($json, true);
+	if (!is_array($decoded)) {
+		return ['inode' => 0, 'offset' => 0];
+	}
+
+	return [
+		'inode' => (int) ($decoded['inode'] ?? 0),
+		'offset' => (int) ($decoded['offset'] ?? 0),
+	];
+}
+
+function save_access_log_cursor(string $logPath, int $inode, int $offset): void
+{
+	$cursorPath = analytics_access_log_cursor_path($logPath);
+	@file_put_contents($cursorPath, json_encode([
+		'inode' => $inode,
+		'offset' => max(0, $offset),
+		'updated_at' => gmdate('c'),
+	], JSON_UNESCAPED_SLASHES), LOCK_EX);
+}
+
+function parse_apache_access_log_line(string $line): ?array
+{
+	$line = trim($line);
+	if ($line === '') {
+		return null;
+	}
+
+	$matched = preg_match(
+		'/^(\S+)\s+\S+\s+\S+\s+\[([^\]]+)\]\s+"([A-Z]+)\s+([^\"]+)\s+HTTP\/[0-9.]+"\s+\d+\s+\S+\s+"([^\"]*)"\s+"([^\"]*)"/',
+		$line,
+		$parts
+	);
+	if ($matched !== 1) {
+		return null;
+	}
+
+	$ipAddress = trim((string) ($parts[1] ?? ''));
+	$timeRaw = trim((string) ($parts[2] ?? ''));
+	$requestTarget = trim((string) ($parts[4] ?? ''));
+	$referrer = trim((string) ($parts[5] ?? ''));
+	$userAgent = trim((string) ($parts[6] ?? ''));
+
+	if ($ipAddress === '' || $requestTarget === '' || $referrer === '-' || $referrer === '') {
+		return null;
+	}
+
+	$hitTime = DateTimeImmutable::createFromFormat('d/M/Y:H:i:s O', $timeRaw);
+	if (!$hitTime) {
+		return null;
+	}
+
+	$path = '';
+	$query = '';
+	if (preg_match('/^https?:\/\//i', $requestTarget) === 1) {
+		$parsedPath = parse_url($requestTarget, PHP_URL_PATH);
+		$parsedQuery = parse_url($requestTarget, PHP_URL_QUERY);
+		$path = is_string($parsedPath) ? $parsedPath : '';
+		$query = is_string($parsedQuery) ? $parsedQuery : '';
+	} else {
+		$path = (string) parse_url($requestTarget, PHP_URL_PATH);
+		$query = (string) parse_url($requestTarget, PHP_URL_QUERY);
+	}
+
+	$path = trim($path);
+	$query = trim($query);
+	if ($path === '') {
+		$path = '/';
+	}
+
+	$scriptName = strtolower((string) basename($path));
+	$sourceType = null;
+	if ($scriptName === 'pix.php') {
+		$sourceType = 'pixel';
+	} elseif ($scriptName === 'link.php') {
+		$sourceType = 'redirect';
+	}
+
+	if ($sourceType === null) {
+		return null;
+	}
+
+	$requestUri = $path . ($query !== '' ? '?' . $query : '');
+
+	return [
+		'source_type' => $sourceType,
+		'ip_address' => $ipAddress,
+		'hit_at_utc' => $hitTime->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s'),
+		'referrer' => substr($referrer, 0, 2048),
+		'user_agent' => substr($userAgent, 0, 1024),
+		'request_uri' => $requestUri,
+		'query_string' => $query,
+	];
+}
+
+function match_access_log_referrer_to_hit(array $event): bool
+{
+	$sourceType = (string) ($event['source_type'] ?? '');
+	$ipAddress = trim((string) ($event['ip_address'] ?? ''));
+	$hitAtUtc = trim((string) ($event['hit_at_utc'] ?? ''));
+	$referrer = trim((string) ($event['referrer'] ?? ''));
+	$queryString = trim((string) ($event['query_string'] ?? ''));
+	$requestUri = trim((string) ($event['request_uri'] ?? ''));
+
+	if ($ipAddress === '' || $hitAtUtc === '' || $referrer === '') {
+		return false;
+	}
+
+	$hitTime = parse_db_datetime_utc($hitAtUtc);
+	if (!$hitTime) {
+		return false;
+	}
+
+	$windowStart = $hitTime->sub(new DateInterval('PT10M'))->format('Y-m-d H:i:s');
+	$windowEnd = $hitTime->add(new DateInterval('PT10M'))->format('Y-m-d H:i:s');
+
+	try {
+		$pdo = db();
+
+		if ($sourceType === 'pixel') {
+			if (!table_exists($pdo, 'pd_pixel_hits')) {
+				return false;
+			}
+
+			$whereClause = '';
+			if ($queryString !== '') {
+				$whereClause = ' AND query_string = :query_string';
+			} elseif ($requestUri !== '') {
+				$whereClause = ' AND request_uri LIKE :request_uri_like';
+			}
+
+			$select = db()->prepare(
+				"SELECT id, pixel_id, pixel_key, ip_address, user_agent, request_uri, accept_language, remote_host
+				 FROM pd_pixel_hits
+				 WHERE ip_address = :ip_address
+				   AND (referrer IS NULL OR TRIM(referrer) = '')
+				   AND hit_at BETWEEN :window_start AND :window_end
+				   $whereClause
+				 ORDER BY ABS(TIMESTAMPDIFF(SECOND, hit_at, :event_time)) ASC, id DESC
+				 LIMIT 1"
+			);
+			$select->bindValue(':ip_address', $ipAddress, PDO::PARAM_STR);
+			$select->bindValue(':window_start', $windowStart, PDO::PARAM_STR);
+			$select->bindValue(':window_end', $windowEnd, PDO::PARAM_STR);
+			$select->bindValue(':event_time', $hitAtUtc, PDO::PARAM_STR);
+			if ($queryString !== '') {
+				$select->bindValue(':query_string', $queryString, PDO::PARAM_STR);
+			} elseif ($requestUri !== '') {
+				$select->bindValue(':request_uri_like', '%' . $requestUri . '%', PDO::PARAM_STR);
+			}
+			$select->execute();
+			$row = $select->fetch();
+			if (!$row) {
+				return false;
+			}
+
+			$update = db()->prepare('UPDATE pd_pixel_hits SET referrer = :referrer WHERE id = :id');
+			$update->execute([
+				'referrer' => $referrer,
+				'id' => (int) $row['id'],
+			]);
+
+			try {
+				classify_and_store_hit(
+					(int) $row['id'],
+					(int) $row['pixel_id'],
+					(string) $row['pixel_key'],
+					[
+						'ip_address' => (string) ($row['ip_address'] ?? ''),
+						'user_agent' => (string) ($row['user_agent'] ?? ''),
+						'referrer' => $referrer,
+						'request_uri' => (string) ($row['request_uri'] ?? ''),
+						'accept_language' => (string) ($row['accept_language'] ?? ''),
+						'remote_host' => (string) ($row['remote_host'] ?? ''),
+					],
+					false
+				);
+			} catch (Throwable $e) {
+			}
+
+			return true;
+		}
+
+		if ($sourceType === 'redirect') {
+			if (!table_exists($pdo, 'pd_redirect_hits')) {
+				return false;
+			}
+
+			$whereClause = '';
+			if ($queryString !== '') {
+				$whereClause = ' AND query_string = :query_string';
+			} elseif ($requestUri !== '') {
+				$whereClause = ' AND request_uri LIKE :request_uri_like';
+			}
+
+			$select = db()->prepare(
+				"SELECT id, redirect_id, redirect_key, ip_address, user_agent, request_uri, accept_language, remote_host
+				 FROM pd_redirect_hits
+				 WHERE ip_address = :ip_address
+				   AND (referrer IS NULL OR TRIM(referrer) = '')
+				   AND hit_at BETWEEN :window_start AND :window_end
+				   $whereClause
+				 ORDER BY ABS(TIMESTAMPDIFF(SECOND, hit_at, :event_time)) ASC, id DESC
+				 LIMIT 1"
+			);
+			$select->bindValue(':ip_address', $ipAddress, PDO::PARAM_STR);
+			$select->bindValue(':window_start', $windowStart, PDO::PARAM_STR);
+			$select->bindValue(':window_end', $windowEnd, PDO::PARAM_STR);
+			$select->bindValue(':event_time', $hitAtUtc, PDO::PARAM_STR);
+			if ($queryString !== '') {
+				$select->bindValue(':query_string', $queryString, PDO::PARAM_STR);
+			} elseif ($requestUri !== '') {
+				$select->bindValue(':request_uri_like', '%' . $requestUri . '%', PDO::PARAM_STR);
+			}
+			$select->execute();
+			$row = $select->fetch();
+			if (!$row) {
+				return false;
+			}
+
+			$update = db()->prepare('UPDATE pd_redirect_hits SET referrer = :referrer WHERE id = :id');
+			$update->execute([
+				'referrer' => $referrer,
+				'id' => (int) $row['id'],
+			]);
+
+			try {
+				classify_and_store_redirect_hit(
+					(int) $row['id'],
+					(int) $row['redirect_id'],
+					(string) $row['redirect_key'],
+					[
+						'ip_address' => (string) ($row['ip_address'] ?? ''),
+						'user_agent' => (string) ($row['user_agent'] ?? ''),
+						'referrer' => $referrer,
+						'request_uri' => (string) ($row['request_uri'] ?? ''),
+						'accept_language' => (string) ($row['accept_language'] ?? ''),
+						'remote_host' => (string) ($row['remote_host'] ?? ''),
+					],
+					false
+				);
+			} catch (Throwable $e) {
+			}
+
+			return true;
+		}
+	} catch (Throwable $e) {
+		return false;
+	}
+
+	return false;
+}
+
+function process_access_log_referrer_enrichment(int $maxLines = 2500): array
+{
+	$logPath = analytics_access_log_path();
+	if ($logPath === null) {
+		return [
+			'enabled' => false,
+			'processed_lines' => 0,
+			'matched_events' => 0,
+			'updated_hits' => 0,
+		];
+	}
+
+	$maxLines = max(100, min(20000, $maxLines));
+	$fileStat = @stat($logPath);
+	if (!is_array($fileStat)) {
+		return [
+			'enabled' => true,
+			'processed_lines' => 0,
+			'matched_events' => 0,
+			'updated_hits' => 0,
+			'error' => 'access_log_unreadable',
+		];
+	}
+
+	$inode = (int) ($fileStat['ino'] ?? 0);
+	$size = (int) ($fileStat['size'] ?? 0);
+	$cursor = load_access_log_cursor($logPath);
+	$offset = (int) ($cursor['offset'] ?? 0);
+	$previousInode = (int) ($cursor['inode'] ?? 0);
+
+	if ($offset < 0 || $size < $offset || ($previousInode > 0 && $previousInode !== $inode)) {
+		$offset = 0;
+	}
+
+	$handle = @fopen($logPath, 'rb');
+	if ($handle === false) {
+		return [
+			'enabled' => true,
+			'processed_lines' => 0,
+			'matched_events' => 0,
+			'updated_hits' => 0,
+			'error' => 'access_log_open_failed',
+		];
+	}
+
+	if ($offset > 0) {
+		@fseek($handle, $offset);
+	}
+
+	$processedLines = 0;
+	$matchedEvents = 0;
+	$updatedHits = 0;
+
+	while (!feof($handle) && $processedLines < $maxLines) {
+		$line = fgets($handle);
+		if ($line === false) {
+			break;
+		}
+
+		$processedLines++;
+		$currentOffset = ftell($handle);
+		if (is_int($currentOffset) && $currentOffset >= 0) {
+			$offset = $currentOffset;
+		}
+
+		$event = parse_apache_access_log_line($line);
+		if (!$event) {
+			continue;
+		}
+
+		$matchedEvents++;
+		if (match_access_log_referrer_to_hit($event)) {
+			$updatedHits++;
+		}
+	}
+
+	fclose($handle);
+	save_access_log_cursor($logPath, $inode, $offset);
+
+	return [
+		'enabled' => true,
+		'path' => $logPath,
+		'processed_lines' => $processedLines,
+		'matched_events' => $matchedEvents,
+		'updated_hits' => $updatedHits,
+	];
+}
+
 function process_ip_enrichment_queue(int $maxRows = 100, int $maxRuntimeSeconds = 8): array
 {
 	$status = analytics_table_status();
-	if (!$status['ip_queue'] || !$status['ip_enrichment']) {
-		return ['processed' => 0, 'succeeded' => 0, 'failed' => 0, 'locked' => false];
+	$hasIpQueue = $status['ip_queue'] && $status['ip_enrichment'];
+	$hasAccessLog = analytics_access_log_path() !== null;
+
+	if (!$hasIpQueue && !$hasAccessLog) {
+		return [
+			'processed' => 0,
+			'succeeded' => 0,
+			'failed' => 0,
+			'locked' => false,
+			'access_log' => [
+				'enabled' => false,
+				'processed_lines' => 0,
+				'matched_events' => 0,
+				'updated_hits' => 0,
+			],
+		];
 	}
 
 	$maxRows = max(1, min(1000, $maxRows));
@@ -1403,68 +1807,108 @@ function process_ip_enrichment_queue(int $maxRows = 100, int $maxRuntimeSeconds 
 	$processed = 0;
 	$succeeded = 0;
 	$failed = 0;
+	$accessLogResult = [
+		'enabled' => false,
+		'processed_lines' => 0,
+		'matched_events' => 0,
+		'updated_hits' => 0,
+	];
 
 	try {
-		$selectStmt = db()->prepare(
-			'SELECT ip_address, attempt_count
-			 FROM pd_ip_enrichment_queue
-			 WHERE next_attempt_at <= NOW()
-			 ORDER BY last_seen_at DESC
-			 LIMIT :limit'
-		);
+		if ($hasIpQueue) {
+			$selectStmt = db()->prepare(
+				'SELECT ip_address, attempt_count
+				 FROM pd_ip_enrichment_queue
+				 WHERE next_attempt_at <= NOW()
+				 ORDER BY last_seen_at DESC
+				 LIMIT :limit'
+			);
 
-		$deleteStmt = db()->prepare('DELETE FROM pd_ip_enrichment_queue WHERE ip_address = :ip_address');
-		$failStmt = db()->prepare(
-			'UPDATE pd_ip_enrichment_queue
-			 SET attempt_count = :attempt_count,
-			     next_attempt_at = DATE_ADD(NOW(), INTERVAL :retry_seconds SECOND),
-			     last_error = :last_error,
-			     updated_at = NOW()
-			 WHERE ip_address = :ip_address'
-		);
+			$deleteStmt = db()->prepare('DELETE FROM pd_ip_enrichment_queue WHERE ip_address = :ip_address');
+			$failStmt = db()->prepare(
+				'UPDATE pd_ip_enrichment_queue
+				 SET attempt_count = :attempt_count,
+				     next_attempt_at = DATE_ADD(NOW(), INTERVAL :retry_seconds SECOND),
+				     last_error = :last_error,
+				     updated_at = NOW()
+				 WHERE ip_address = :ip_address'
+			);
 
-		while ($processed < $maxRows && (microtime(true) - $startedAt) < $maxRuntimeSeconds) {
-			$remaining = $maxRows - $processed;
-			$selectStmt->bindValue(':limit', min(50, $remaining), PDO::PARAM_INT);
-			$selectStmt->execute();
-			$batch = $selectStmt->fetchAll();
-			if (!$batch) {
-				break;
-			}
-
-			foreach ($batch as $row) {
-				if ($processed >= $maxRows || (microtime(true) - $startedAt) >= $maxRuntimeSeconds) {
+			while ($processed < $maxRows && (microtime(true) - $startedAt) < $maxRuntimeSeconds) {
+				$remaining = $maxRows - $processed;
+				$selectStmt->bindValue(':limit', min(50, $remaining), PDO::PARAM_INT);
+				$selectStmt->execute();
+				$batch = $selectStmt->fetchAll();
+				if (!$batch) {
 					break;
 				}
 
-				$processed++;
-				$ipAddress = trim((string) ($row['ip_address'] ?? ''));
-				$attempt = (int) ($row['attempt_count'] ?? 0) + 1;
+				foreach ($batch as $row) {
+					if ($processed >= $maxRows || (microtime(true) - $startedAt) >= $maxRuntimeSeconds) {
+						break;
+					}
 
-				if ($ipAddress === '') {
-					$failed++;
-					continue;
-				}
+					$processed++;
+					$ipAddress = trim((string) ($row['ip_address'] ?? ''));
+					$attempt = (int) ($row['attempt_count'] ?? 0) + 1;
 
-				try {
-					$enrichment = ensure_ip_enrichment($ipAddress, true);
-					$source = (string) ($enrichment['source'] ?? 'unresolved');
-
-					if ($source !== 'unresolved') {
-						$deleteStmt->execute(['ip_address' => $ipAddress]);
-						$succeeded++;
+					if ($ipAddress === '') {
+						$failed++;
 						continue;
 					}
-				} catch (Throwable $e) {
-				}
 
-				$failed++;
-				$retrySeconds = min(3600, (int) pow(2, min($attempt, 10)));
-				$failStmt->bindValue(':attempt_count', $attempt, PDO::PARAM_INT);
-				$failStmt->bindValue(':retry_seconds', $retrySeconds, PDO::PARAM_INT);
-				$failStmt->bindValue(':last_error', 'lookup_failed', PDO::PARAM_STR);
-				$failStmt->bindValue(':ip_address', $ipAddress, PDO::PARAM_STR);
-				$failStmt->execute();
+					try {
+						$enrichment = ensure_ip_enrichment($ipAddress, true);
+						$source = (string) ($enrichment['source'] ?? 'unresolved');
+
+						if ($source !== 'unresolved') {
+							$deleteStmt->execute(['ip_address' => $ipAddress]);
+							$succeeded++;
+							continue;
+						}
+					} catch (Throwable $e) {
+					}
+
+					$failed++;
+					$retrySeconds = min(3600, (int) pow(2, min($attempt, 10)));
+					$failStmt->bindValue(':attempt_count', $attempt, PDO::PARAM_INT);
+					$failStmt->bindValue(':retry_seconds', $retrySeconds, PDO::PARAM_INT);
+					$failStmt->bindValue(':last_error', 'lookup_failed', PDO::PARAM_STR);
+					$failStmt->bindValue(':ip_address', $ipAddress, PDO::PARAM_STR);
+					$failStmt->execute();
+				}
+			}
+		}
+
+		$elapsedSeconds = microtime(true) - $startedAt;
+		$remainingSeconds = $maxRuntimeSeconds - $elapsedSeconds;
+		$accessLogMaxLines = analytics_access_log_max_lines_per_run();
+		if ($remainingSeconds <= 0.2) {
+			$accessLogResult = [
+				'enabled' => analytics_access_log_path() !== null,
+				'processed_lines' => 0,
+				'matched_events' => 0,
+				'updated_hits' => 0,
+				'skipped' => 'runtime_budget_exhausted',
+			];
+		} else {
+			if ($remainingSeconds < 1.0) {
+				$accessLogMaxLines = min($accessLogMaxLines, 300);
+			}
+			$accessLogResult = process_access_log_referrer_enrichment($accessLogMaxLines);
+		}
+	} catch (Throwable $e) {
+		if (($accessLogResult['enabled'] ?? false) !== true) {
+			try {
+				$accessLogResult = process_access_log_referrer_enrichment(min(500, analytics_access_log_max_lines_per_run()));
+			} catch (Throwable $inner) {
+				$accessLogResult = [
+					'enabled' => true,
+					'processed_lines' => 0,
+					'matched_events' => 0,
+					'updated_hits' => 0,
+					'error' => 'access_log_processing_failed',
+				];
 			}
 		}
 	} finally {
@@ -1477,6 +1921,7 @@ function process_ip_enrichment_queue(int $maxRows = 100, int $maxRuntimeSeconds 
 		'succeeded' => $succeeded,
 		'failed' => $failed,
 		'locked' => false,
+		'access_log' => $accessLogResult,
 	];
 }
 

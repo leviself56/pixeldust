@@ -138,6 +138,7 @@ $tableStatus = analytics_table_status();
 $summary = [
 	'total_hits' => 0,
 	'unique_ips' => 0,
+	'estimated_visits_balanced' => 0,
 	'unique_referrers' => 0,
 	'proxy_hits' => 0,
 	'human_hits' => 0,
@@ -199,6 +200,25 @@ if ($selectedSource) {
 		'cutoff_utc' => $cutoffUtc,
 	]);
 	$summary = array_merge($summary, (array) $summaryStmt->fetch());
+
+	$balancedFingerprintExpr = "CONCAT(COALESCE(h.ip_address, ''), '|', MD5(CONCAT(COALESCE(h.user_agent, ''), '|', COALESCE(h.accept_language, ''))))";
+	$balancedVisitsSql =
+		"WITH ordered_hits AS (
+			SELECT
+				h.hit_at,
+				LAG(h.hit_at) OVER (PARTITION BY $balancedFingerprintExpr ORDER BY h.hit_at) AS prev_hit
+			FROM $hitTable h
+			WHERE h.$idColumn = :source_id AND h.hit_at >= :cutoff_utc
+		)
+		SELECT COALESCE(SUM(CASE WHEN prev_hit IS NULL OR TIMESTAMPDIFF(MINUTE, prev_hit, hit_at) > 30 THEN 1 ELSE 0 END), 0) AS estimated_visits_balanced
+		FROM ordered_hits";
+	$balancedVisitsStmt = db()->prepare($balancedVisitsSql);
+	$balancedVisitsStmt->execute([
+		'source_id' => (int) $selectedSource['id'],
+		'cutoff_utc' => $cutoffUtc,
+	]);
+	$balancedVisitsRow = (array) $balancedVisitsStmt->fetch();
+	$summary['estimated_visits_balanced'] = (int) ($balancedVisitsRow['estimated_visits_balanced'] ?? 0);
 
 	$refSql =
 		"SELECT $referrerDomainExpr AS ref_domain, COUNT(*) AS hits
@@ -372,8 +392,9 @@ render_header('Analytics');
 <?php if ($selectedSource): ?>
 	<div class="row">
 		<div class="card"><h3>Total Hits</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['total_hits'] ?? 0))); ?></p></div>
+		<div class="card"><h3>Estimated Visits</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['estimated_visits_balanced'] ?? 0))); ?></p></div>
 		<div class="card"><h3>Unique IPs</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['unique_ips'] ?? 0))); ?></p></div>
-		<div class="card"><h3>Unique Referrers</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['unique_referrers'] ?? 0))); ?></p></div>
+		<!--<div class="card"><h3>Unique Referrers</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['unique_referrers'] ?? 0))); ?></p></div> -->
 		<div class="card"><h3>Proxy Hits</h3><p style="font-size:1.5rem;font-weight:bold;"><?php echo e((string) ((int) ($summary['proxy_hits'] ?? 0))); ?></p></div>
 	</div>
 
