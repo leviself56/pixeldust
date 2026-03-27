@@ -423,6 +423,8 @@ function run_schema_migrations(PDO $pdo): array
 				asn VARCHAR(20) NULL,
 				asn_org VARCHAR(255) NULL,
 				isp_name VARCHAR(255) NULL,
+				reverse_host VARCHAR(255) NULL,
+				reverse_host_updated_at DATETIME NULL,
 				is_proxy TINYINT(1) NOT NULL DEFAULT 0,
 				is_hosting TINYINT(1) NOT NULL DEFAULT 0,
 				source VARCHAR(50) NOT NULL DEFAULT "unresolved",
@@ -470,6 +472,28 @@ function run_schema_migrations(PDO $pdo): array
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
 		);
 		$applied[] = 'Created table pd_ip_enrichment_queue';
+	}
+
+	if (!table_exists($pdo, 'pd_traffic_fingerprint_library')) {
+		$pdo->exec(
+			'CREATE TABLE pd_traffic_fingerprint_library (
+				fingerprint_key CHAR(40) PRIMARY KEY,
+				source_type VARCHAR(20) NOT NULL,
+				endpoint_path VARCHAR(255) NOT NULL,
+				user_agent_hash CHAR(40) NOT NULL,
+				user_agent_sample VARCHAR(255) NULL,
+				hit_count INT UNSIGNED NOT NULL DEFAULT 0,
+				distinct_ip_count INT UNSIGNED NOT NULL DEFAULT 0,
+				last_ip_address VARCHAR(45) NULL,
+				last_seen_at DATETIME NOT NULL,
+				avg_interval_seconds DECIMAL(10,3) NULL,
+				min_interval_seconds INT UNSIGNED NULL,
+				classification VARCHAR(20) NOT NULL DEFAULT "unknown",
+				confidence DECIMAL(4,3) NOT NULL DEFAULT 0.000,
+				updated_at DATETIME NOT NULL
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+		);
+		$applied[] = 'Created table pd_traffic_fingerprint_library';
 	}
 
 	$pixelColumns = [
@@ -598,6 +622,8 @@ function run_schema_migrations(PDO $pdo): array
 		'asn' => 'ALTER TABLE pd_ip_enrichment ADD COLUMN asn VARCHAR(20) NULL AFTER longitude',
 		'asn_org' => 'ALTER TABLE pd_ip_enrichment ADD COLUMN asn_org VARCHAR(255) NULL AFTER asn',
 		'isp_name' => 'ALTER TABLE pd_ip_enrichment ADD COLUMN isp_name VARCHAR(255) NULL AFTER asn_org',
+		'reverse_host' => 'ALTER TABLE pd_ip_enrichment ADD COLUMN reverse_host VARCHAR(255) NULL AFTER isp_name',
+		'reverse_host_updated_at' => 'ALTER TABLE pd_ip_enrichment ADD COLUMN reverse_host_updated_at DATETIME NULL AFTER reverse_host',
 		'is_proxy' => 'ALTER TABLE pd_ip_enrichment ADD COLUMN is_proxy TINYINT(1) NOT NULL DEFAULT 0 AFTER isp_name',
 		'is_hosting' => 'ALTER TABLE pd_ip_enrichment ADD COLUMN is_hosting TINYINT(1) NOT NULL DEFAULT 0 AFTER is_proxy',
 		'source' => 'ALTER TABLE pd_ip_enrichment ADD COLUMN source VARCHAR(50) NOT NULL DEFAULT "unresolved" AFTER is_hosting',
@@ -668,6 +694,29 @@ function run_schema_migrations(PDO $pdo): array
 		}
 	}
 
+	$fingerprintColumns = [
+		'source_type' => 'ALTER TABLE pd_traffic_fingerprint_library ADD COLUMN source_type VARCHAR(20) NOT NULL DEFAULT "unknown" AFTER fingerprint_key',
+		'endpoint_path' => 'ALTER TABLE pd_traffic_fingerprint_library ADD COLUMN endpoint_path VARCHAR(255) NOT NULL DEFAULT "/" AFTER source_type',
+		'user_agent_hash' => 'ALTER TABLE pd_traffic_fingerprint_library ADD COLUMN user_agent_hash CHAR(40) NOT NULL AFTER endpoint_path',
+		'user_agent_sample' => 'ALTER TABLE pd_traffic_fingerprint_library ADD COLUMN user_agent_sample VARCHAR(255) NULL AFTER user_agent_hash',
+		'hit_count' => 'ALTER TABLE pd_traffic_fingerprint_library ADD COLUMN hit_count INT UNSIGNED NOT NULL DEFAULT 0 AFTER user_agent_sample',
+		'distinct_ip_count' => 'ALTER TABLE pd_traffic_fingerprint_library ADD COLUMN distinct_ip_count INT UNSIGNED NOT NULL DEFAULT 0 AFTER hit_count',
+		'last_ip_address' => 'ALTER TABLE pd_traffic_fingerprint_library ADD COLUMN last_ip_address VARCHAR(45) NULL AFTER distinct_ip_count',
+		'last_seen_at' => 'ALTER TABLE pd_traffic_fingerprint_library ADD COLUMN last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER last_ip_address',
+		'avg_interval_seconds' => 'ALTER TABLE pd_traffic_fingerprint_library ADD COLUMN avg_interval_seconds DECIMAL(10,3) NULL AFTER last_seen_at',
+		'min_interval_seconds' => 'ALTER TABLE pd_traffic_fingerprint_library ADD COLUMN min_interval_seconds INT UNSIGNED NULL AFTER avg_interval_seconds',
+		'classification' => 'ALTER TABLE pd_traffic_fingerprint_library ADD COLUMN classification VARCHAR(20) NOT NULL DEFAULT "unknown" AFTER min_interval_seconds',
+		'confidence' => 'ALTER TABLE pd_traffic_fingerprint_library ADD COLUMN confidence DECIMAL(4,3) NOT NULL DEFAULT 0.000 AFTER classification',
+		'updated_at' => 'ALTER TABLE pd_traffic_fingerprint_library ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER confidence',
+	];
+
+	foreach ($fingerprintColumns as $column => $sql) {
+		if (!column_exists($pdo, 'pd_traffic_fingerprint_library', $column)) {
+			$pdo->exec($sql);
+			$applied[] = 'Added column pd_traffic_fingerprint_library.' . $column;
+		}
+	}
+
 	$indexes = [
 		['table' => 'pd_pixels', 'name' => 'idx_pixel_key', 'sql' => 'CREATE INDEX idx_pixel_key ON pd_pixels (pixel_key)'],
 		['table' => 'pd_pixel_hits', 'name' => 'idx_pixel_id', 'sql' => 'CREATE INDEX idx_pixel_id ON pd_pixel_hits (pixel_id)'],
@@ -686,6 +735,7 @@ function run_schema_migrations(PDO $pdo): array
 		['table' => 'pd_ip_enrichment', 'name' => 'idx_country', 'sql' => 'CREATE INDEX idx_country ON pd_ip_enrichment (country_code)'],
 		['table' => 'pd_ip_enrichment', 'name' => 'idx_asn', 'sql' => 'CREATE INDEX idx_asn ON pd_ip_enrichment (asn)'],
 		['table' => 'pd_ip_enrichment', 'name' => 'idx_isp', 'sql' => 'CREATE INDEX idx_isp ON pd_ip_enrichment (isp_name)'],
+		['table' => 'pd_ip_enrichment', 'name' => 'idx_reverse_host', 'sql' => 'CREATE INDEX idx_reverse_host ON pd_ip_enrichment (reverse_host)'],
 		['table' => 'pd_hit_classification', 'name' => 'idx_pixel_time', 'sql' => 'CREATE INDEX idx_pixel_time ON pd_hit_classification (pixel_id, classified_at)'],
 		['table' => 'pd_hit_classification', 'name' => 'idx_pixel_ip', 'sql' => 'CREATE INDEX idx_pixel_ip ON pd_hit_classification (pixel_id, ip_address)'],
 		['table' => 'pd_hit_classification', 'name' => 'idx_email_client', 'sql' => 'CREATE INDEX idx_email_client ON pd_hit_classification (email_client_guess)'],
@@ -703,6 +753,9 @@ function run_schema_migrations(PDO $pdo): array
 		['table' => 'pd_redirect_hit_classification', 'name' => 'idx_traffic_type', 'sql' => 'CREATE INDEX idx_traffic_type ON pd_redirect_hit_classification (traffic_type)'],
 		['table' => 'pd_ip_enrichment_queue', 'name' => 'idx_next_attempt', 'sql' => 'CREATE INDEX idx_next_attempt ON pd_ip_enrichment_queue (next_attempt_at)'],
 		['table' => 'pd_ip_enrichment_queue', 'name' => 'idx_last_seen', 'sql' => 'CREATE INDEX idx_last_seen ON pd_ip_enrichment_queue (last_seen_at)'],
+		['table' => 'pd_traffic_fingerprint_library', 'name' => 'idx_source_type', 'sql' => 'CREATE INDEX idx_source_type ON pd_traffic_fingerprint_library (source_type)'],
+		['table' => 'pd_traffic_fingerprint_library', 'name' => 'idx_classification', 'sql' => 'CREATE INDEX idx_classification ON pd_traffic_fingerprint_library (classification)'],
+		['table' => 'pd_traffic_fingerprint_library', 'name' => 'idx_last_seen', 'sql' => 'CREATE INDEX idx_last_seen ON pd_traffic_fingerprint_library (last_seen_at)'],
 	];
 
 	foreach ($indexes as $indexDef) {
@@ -730,6 +783,7 @@ function analytics_table_status(): array
 			'hit_classification' => table_exists($pdo, 'pd_hit_classification'),
 			'redirect_hit_classification' => table_exists($pdo, 'pd_redirect_hit_classification'),
 			'ip_queue' => table_exists($pdo, 'pd_ip_enrichment_queue'),
+			'traffic_fingerprints' => table_exists($pdo, 'pd_traffic_fingerprint_library'),
 		];
 	} catch (Throwable $e) {
 		$status = [
@@ -737,6 +791,7 @@ function analytics_table_status(): array
 			'hit_classification' => false,
 			'redirect_hit_classification' => false,
 			'ip_queue' => false,
+			'traffic_fingerprints' => false,
 		];
 	}
 
@@ -802,6 +857,139 @@ function infer_isp_from_remote_host(?string $remoteHost): ?string
 	return $remoteHost;
 }
 
+function normalize_reverse_host_result(string $ipAddress, ?string $resolved): ?string
+{
+	$resolved = trim((string) $resolved);
+	if ($resolved === '') {
+		return null;
+	}
+
+	$resolvedLower = strtolower($resolved);
+	if ($resolvedLower === strtolower($ipAddress)) {
+		return null;
+	}
+
+	if (preg_match('/^[0-9]+(\.[0-9]+){3}$/', $resolvedLower) === 1) {
+		return null;
+	}
+
+	return substr($resolvedLower, 0, 255);
+}
+
+function resolve_reverse_host_for_ip(string $ipAddress): ?string
+{
+	$ipAddress = trim($ipAddress);
+	if ($ipAddress === '' || !is_public_ip($ipAddress)) {
+		return null;
+	}
+
+	$resolved = @gethostbyaddr($ipAddress);
+	if (!is_string($resolved)) {
+		return null;
+	}
+
+	return normalize_reverse_host_result($ipAddress, $resolved);
+}
+
+function ensure_reverse_host_for_ip(string $ipAddress, bool $allowLookup = false): ?string
+{
+	$status = analytics_table_status();
+	if (!$status['ip_enrichment']) {
+		return null;
+	}
+
+	$ipAddress = trim($ipAddress);
+	if ($ipAddress === '') {
+		return null;
+	}
+
+	try {
+		$existingStmt = db()->prepare('SELECT reverse_host, reverse_host_updated_at FROM pd_ip_enrichment WHERE ip_address = :ip_address LIMIT 1');
+		$existingStmt->execute(['ip_address' => $ipAddress]);
+		$existing = $existingStmt->fetch();
+		if ($existing && trim((string) ($existing['reverse_host'] ?? '')) !== '') {
+			return (string) $existing['reverse_host'];
+		}
+	} catch (Throwable $e) {
+		return null;
+	}
+
+	if (!$allowLookup) {
+		return null;
+	}
+
+	$resolvedHost = resolve_reverse_host_for_ip($ipAddress);
+	if ($resolvedHost === null) {
+		return null;
+	}
+
+	try {
+		$upsert = db()->prepare(
+			'INSERT INTO pd_ip_enrichment (ip_address, reverse_host, reverse_host_updated_at, source, confidence, updated_at)
+			 VALUES (:ip_address, :reverse_host, NOW(), "rdns", 0.500, NOW())
+			 ON DUPLICATE KEY UPDATE
+				reverse_host = VALUES(reverse_host),
+				reverse_host_updated_at = NOW(),
+				updated_at = NOW()'
+		);
+		$upsert->execute([
+			'ip_address' => $ipAddress,
+			'reverse_host' => $resolvedHost,
+		]);
+	} catch (Throwable $e) {
+	}
+
+	return $resolvedHost;
+}
+
+function backfill_remote_host_for_ip_hits(string $ipAddress, string $remoteHost, int $maxRowsPerTable = 250): int
+{
+	$ipAddress = trim($ipAddress);
+	$remoteHost = trim($remoteHost);
+	if ($ipAddress === '' || $remoteHost === '' || $maxRowsPerTable < 1) {
+		return 0;
+	}
+
+	$updated = 0;
+	$maxRowsPerTable = max(1, min(2000, $maxRowsPerTable));
+
+	try {
+		$pdo = db();
+		if (table_exists($pdo, 'pd_pixel_hits')) {
+			$updatePixel = db()->prepare(
+				'UPDATE pd_pixel_hits
+				 SET remote_host = :remote_host
+				 WHERE ip_address = :ip_address
+				   AND (remote_host IS NULL OR TRIM(remote_host) = \'\')
+				 LIMIT :row_limit'
+			);
+			$updatePixel->bindValue(':remote_host', $remoteHost, PDO::PARAM_STR);
+			$updatePixel->bindValue(':ip_address', $ipAddress, PDO::PARAM_STR);
+			$updatePixel->bindValue(':row_limit', $maxRowsPerTable, PDO::PARAM_INT);
+			$updatePixel->execute();
+			$updated += (int) $updatePixel->rowCount();
+		}
+
+		if (table_exists($pdo, 'pd_redirect_hits')) {
+			$updateRedirect = db()->prepare(
+				'UPDATE pd_redirect_hits
+				 SET remote_host = :remote_host
+				 WHERE ip_address = :ip_address
+				   AND (remote_host IS NULL OR TRIM(remote_host) = \'\')
+				 LIMIT :row_limit'
+			);
+			$updateRedirect->bindValue(':remote_host', $remoteHost, PDO::PARAM_STR);
+			$updateRedirect->bindValue(':ip_address', $ipAddress, PDO::PARAM_STR);
+			$updateRedirect->bindValue(':row_limit', $maxRowsPerTable, PDO::PARAM_INT);
+			$updateRedirect->execute();
+			$updated += (int) $updateRedirect->rowCount();
+		}
+	} catch (Throwable $e) {
+	}
+
+	return $updated;
+}
+
 function infer_email_client(array $hit): array
 {
 	$userAgent = strtolower((string) ($hit['user_agent'] ?? ''));
@@ -844,11 +1032,135 @@ function infer_email_client(array $hit): array
 	return ['client' => 'unknown', 'confidence' => 0.2];
 }
 
+function extract_request_path_from_uri(?string $requestUri): string
+{
+	$requestUri = trim((string) $requestUri);
+	if ($requestUri === '') {
+		return '/';
+	}
+
+	$path = parse_url($requestUri, PHP_URL_PATH);
+	if (!is_string($path) || trim($path) === '') {
+		return '/';
+	}
+
+	$path = '/' . ltrim(trim($path), '/');
+	return strtolower($path);
+}
+
+function infer_source_type_from_request_uri(?string $requestUri): string
+{
+	$path = extract_request_path_from_uri($requestUri);
+	$scriptName = strtolower((string) basename($path));
+	if ($scriptName === 'pix.php') {
+		return 'pixel';
+	}
+	if ($scriptName === 'link.php') {
+		return 'redirect';
+	}
+
+	return 'unknown';
+}
+
+function traffic_fingerprint_key(string $sourceType, string $requestPath, string $userAgent): string
+{
+	$sourceType = strtolower(trim($sourceType));
+	$requestPath = strtolower(trim($requestPath));
+	$userAgent = strtolower(trim($userAgent));
+	return sha1($sourceType . '|' . $requestPath . '|' . $userAgent);
+}
+
+function infer_traffic_classification_from_observation(string $userAgent, int $hitCount, int $distinctIpCount, ?float $avgIntervalSeconds, ?int $minIntervalSeconds): array
+{
+	$userAgent = strtolower(trim($userAgent));
+
+	if ($userAgent !== '' && (strpos($userAgent, 'googleimageproxy') !== false || strpos($userAgent, 'yahoomailproxy') !== false || strpos($userAgent, 'oneoutlook/') !== false || strpos($userAgent, 'ms-office') !== false)) {
+		return ['classification' => 'proxy', 'confidence' => 0.95];
+	}
+
+	if ($userAgent !== '' && (strpos($userAgent, 'bot') !== false || strpos($userAgent, 'crawler') !== false || strpos($userAgent, 'spider') !== false || strpos($userAgent, 'curl/') !== false || strpos($userAgent, 'wget/') !== false || strpos($userAgent, 'python-requests') !== false || strpos($userAgent, 'headless') !== false)) {
+		return ['classification' => 'bot', 'confidence' => 0.95];
+	}
+
+	if ($hitCount >= 25 && $distinctIpCount <= 2 && $avgIntervalSeconds !== null && $avgIntervalSeconds <= 5.0) {
+		return ['classification' => 'bot', 'confidence' => 0.85];
+	}
+
+	if ($hitCount >= 40 && $avgIntervalSeconds !== null && $avgIntervalSeconds <= 12.0 && $minIntervalSeconds !== null && $minIntervalSeconds <= 1) {
+		return ['classification' => 'bot', 'confidence' => 0.80];
+	}
+
+	if ($hitCount >= 15 && $distinctIpCount >= 4 && $avgIntervalSeconds !== null && $avgIntervalSeconds <= 20.0) {
+		return ['classification' => 'proxy', 'confidence' => 0.72];
+	}
+
+	return ['classification' => 'unknown', 'confidence' => 0.20];
+}
+
+function get_traffic_type_hint_from_fingerprint(array $hit): ?string
+{
+	static $cache = [];
+
+	$status = analytics_table_status();
+	if (!(bool) ($status['traffic_fingerprints'] ?? false)) {
+		return null;
+	}
+
+	$requestUri = (string) ($hit['request_uri'] ?? '');
+	$userAgent = (string) ($hit['user_agent'] ?? '');
+	$sourceType = (string) ($hit['source_type'] ?? infer_source_type_from_request_uri($requestUri));
+	$requestPath = extract_request_path_from_uri($requestUri);
+
+	if ($sourceType === 'unknown' || trim($userAgent) === '') {
+		return null;
+	}
+
+	$key = traffic_fingerprint_key($sourceType, $requestPath, $userAgent);
+	if (array_key_exists($key, $cache)) {
+		return $cache[$key];
+	}
+
+	try {
+		$stmt = db()->prepare(
+			'SELECT classification, confidence
+			 FROM pd_traffic_fingerprint_library
+			 WHERE fingerprint_key = :fingerprint_key
+			 LIMIT 1'
+		);
+		$stmt->execute(['fingerprint_key' => $key]);
+		$row = $stmt->fetch();
+		if (!$row) {
+			$cache[$key] = null;
+			return null;
+		}
+
+		$classification = strtolower(trim((string) ($row['classification'] ?? '')));
+		$confidence = (float) ($row['confidence'] ?? 0);
+		if (($classification === 'bot' || $classification === 'proxy') && $confidence >= 0.7) {
+			$cache[$key] = $classification;
+			return $classification;
+		}
+	} catch (Throwable $e) {
+	}
+
+	$cache[$key] = null;
+	return null;
+}
+
 function infer_traffic_type(array $hit, array $enrichment, string $emailClient): string
 {
 	$userAgent = strtolower((string) ($hit['user_agent'] ?? ''));
+	$fingerprintHint = get_traffic_type_hint_from_fingerprint($hit);
+
+	if ($fingerprintHint === 'bot') {
+		return 'bot';
+	}
 
 	if ($emailClient === 'gmail' || $emailClient === 'yahoo_mail') {
+		return 'proxy';
+	}
+
+	if ($fingerprintHint === 'proxy') {
 		return 'proxy';
 	}
 
@@ -879,6 +1191,7 @@ function lookup_ip_enrichment_remote(string $ipAddress): array
 		'asn' => null,
 		'asn_org' => null,
 		'isp_name' => null,
+		'reverse_host' => null,
 		'is_proxy' => 0,
 		'is_hosting' => 0,
 		'source' => 'unresolved',
@@ -1056,10 +1369,19 @@ function classify_and_store_hit(int $hitId, int $pixelId, string $pixelKey, arra
 	$enrichment = $ipAddress !== '' ? ensure_ip_enrichment($ipAddress, $allowRemoteLookup) : [
 		'is_proxy' => 0,
 		'isp_name' => null,
+		'reverse_host' => null,
 	];
+	$resolvedRemoteHost = trim((string) ($hitData['remote_host'] ?? ''));
+	if ($resolvedRemoteHost === '') {
+		$resolvedRemoteHost = trim((string) ($enrichment['reverse_host'] ?? ''));
+	}
+	$hitData['remote_host'] = $resolvedRemoteHost;
+	if (!isset($hitData['source_type'])) {
+		$hitData['source_type'] = 'pixel';
+	}
 
 	$email = infer_email_client($hitData);
-	$remoteHostIsp = infer_isp_from_remote_host((string) ($hitData['remote_host'] ?? ''));
+	$remoteHostIsp = infer_isp_from_remote_host($resolvedRemoteHost);
 	$asnIsp = trim((string) ($enrichment['asn_org'] ?? ''));
 	$ispName = trim((string) ($enrichment['isp_name'] ?? ''));
 
@@ -1203,10 +1525,19 @@ function classify_and_store_redirect_hit(int $hitId, int $redirectId, string $re
 	$enrichment = $ipAddress !== '' ? ensure_ip_enrichment($ipAddress, $allowRemoteLookup) : [
 		'is_proxy' => 0,
 		'isp_name' => null,
+		'reverse_host' => null,
 	];
+	$resolvedRemoteHost = trim((string) ($hitData['remote_host'] ?? ''));
+	if ($resolvedRemoteHost === '') {
+		$resolvedRemoteHost = trim((string) ($enrichment['reverse_host'] ?? ''));
+	}
+	$hitData['remote_host'] = $resolvedRemoteHost;
+	if (!isset($hitData['source_type'])) {
+		$hitData['source_type'] = 'redirect';
+	}
 
 	$email = infer_email_client($hitData);
-	$remoteHostIsp = infer_isp_from_remote_host((string) ($hitData['remote_host'] ?? ''));
+	$remoteHostIsp = infer_isp_from_remote_host($resolvedRemoteHost);
 	$asnIsp = trim((string) ($enrichment['asn_org'] ?? ''));
 	$ispName = trim((string) ($enrichment['isp_name'] ?? ''));
 
@@ -1452,7 +1783,7 @@ function save_access_log_cursor(string $logPath, int $inode, int $offset): void
 	], JSON_UNESCAPED_SLASHES), LOCK_EX);
 }
 
-function parse_apache_access_log_line(string $line): ?array
+function parse_apache_access_log_raw_line(string $line): ?array
 {
 	$line = trim($line);
 	if ($line === '') {
@@ -1470,12 +1801,17 @@ function parse_apache_access_log_line(string $line): ?array
 
 	$ipAddress = trim((string) ($parts[1] ?? ''));
 	$timeRaw = trim((string) ($parts[2] ?? ''));
+	$method = strtoupper(trim((string) ($parts[3] ?? '')));
 	$requestTarget = trim((string) ($parts[4] ?? ''));
 	$referrer = trim((string) ($parts[5] ?? ''));
 	$userAgent = trim((string) ($parts[6] ?? ''));
 
-	if ($ipAddress === '' || $requestTarget === '' || $referrer === '-' || $referrer === '') {
+	if ($ipAddress === '' || $requestTarget === '') {
 		return null;
+	}
+
+	if ($referrer === '-') {
+		$referrer = '';
 	}
 
 	$hitTime = DateTimeImmutable::createFromFormat('d/M/Y:H:i:s O', $timeRaw);
@@ -1509,21 +1845,243 @@ function parse_apache_access_log_line(string $line): ?array
 		$sourceType = 'redirect';
 	}
 
-	if ($sourceType === null) {
-		return null;
-	}
-
 	$requestUri = $path . ($query !== '' ? '?' . $query : '');
 
 	return [
 		'source_type' => $sourceType,
 		'ip_address' => $ipAddress,
 		'hit_at_utc' => $hitTime->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s'),
+		'method' => $method,
 		'referrer' => substr($referrer, 0, 2048),
 		'user_agent' => substr($userAgent, 0, 1024),
 		'request_uri' => $requestUri,
 		'query_string' => $query,
+		'path' => $path,
 	];
+}
+
+function parse_apache_access_log_line(string $line): ?array
+{
+	$raw = parse_apache_access_log_raw_line($line);
+	if (!is_array($raw)) {
+		return null;
+	}
+
+	if (!in_array((string) ($raw['source_type'] ?? ''), ['pixel', 'redirect'], true)) {
+		return null;
+	}
+
+	return $raw;
+}
+
+function normalize_source_attribution_value(string $value): string
+{
+	$value = trim($value);
+	if ($value === '' || $value === '-') {
+		return '';
+	}
+
+	if (filter_var($value, FILTER_VALIDATE_URL)) {
+		return $value;
+	}
+
+	if (preg_match('/^[a-z0-9.-]+\.[a-z]{2,}(?:\/.*)?$/i', $value) === 1) {
+		$asUrl = 'https://' . ltrim($value, '/');
+		if (filter_var($asUrl, FILTER_VALIDATE_URL)) {
+			return $asUrl;
+		}
+	}
+
+	$value = preg_replace('/[^a-z0-9._\-]+/i', '_', $value);
+	$value = trim((string) $value, '_');
+	if ($value === '') {
+		return '';
+	}
+
+	return 'tag://' . $value;
+}
+
+function extract_source_attribution_from_query(string $queryString): string
+{
+	$queryString = trim($queryString);
+	if ($queryString === '') {
+		return '';
+	}
+
+	$params = [];
+	parse_str($queryString, $params);
+	if (!is_array($params) || !$params) {
+		return '';
+	}
+
+	$candidateKeys = ['ref', 'utm_source', 'source', 'src', 'from', 'campaign_source'];
+	foreach ($candidateKeys as $key) {
+		if (!array_key_exists($key, $params)) {
+			continue;
+		}
+		$value = $params[$key];
+		if (is_array($value)) {
+			$value = (string) reset($value);
+		}
+		$normalized = normalize_source_attribution_value((string) $value);
+		if ($normalized !== '') {
+			return $normalized;
+		}
+	}
+
+	return '';
+}
+
+function derive_source_attribution_referrer(array $event, ?array $chainHint = null): string
+{
+	$existingReferrer = normalize_source_attribution_value((string) ($event['referrer'] ?? ''));
+	if ($existingReferrer !== '') {
+		return $existingReferrer;
+	}
+
+	$queryHint = extract_source_attribution_from_query((string) ($event['query_string'] ?? ''));
+	if ($queryHint !== '') {
+		return $queryHint;
+	}
+
+	if (is_array($chainHint)) {
+		$chainReferrer = normalize_source_attribution_value((string) ($chainHint['referrer'] ?? ''));
+		$chainSeenAt = parse_db_datetime_utc((string) ($chainHint['seen_at'] ?? ''));
+		$eventTime = parse_db_datetime_utc((string) ($event['hit_at_utc'] ?? ''));
+		if ($chainReferrer !== '' && $chainSeenAt && $eventTime) {
+			$age = abs($eventTime->getTimestamp() - $chainSeenAt->getTimestamp());
+			if ($age <= 20 * 60) {
+				return $chainReferrer;
+			}
+		}
+	}
+
+	return '';
+}
+
+function record_traffic_fingerprint_observation(array $event): bool
+{
+	$status = analytics_table_status();
+	if (!(bool) ($status['traffic_fingerprints'] ?? false)) {
+		return false;
+	}
+
+	$sourceType = trim((string) ($event['source_type'] ?? ''));
+	$userAgent = trim((string) ($event['user_agent'] ?? ''));
+	$ipAddress = trim((string) ($event['ip_address'] ?? ''));
+	$hitAtUtc = trim((string) ($event['hit_at_utc'] ?? ''));
+	$requestPath = extract_request_path_from_uri((string) ($event['request_uri'] ?? ''));
+
+	if (!in_array($sourceType, ['pixel', 'redirect'], true) || $userAgent === '' || $ipAddress === '' || $hitAtUtc === '') {
+		return false;
+	}
+
+	$fingerprintKey = traffic_fingerprint_key($sourceType, $requestPath, $userAgent);
+	$userAgentHash = sha1(strtolower($userAgent));
+	$userAgentSample = function_exists('mb_substr') ? (string) mb_substr($userAgent, 0, 255) : substr($userAgent, 0, 255);
+
+	try {
+		$select = db()->prepare(
+			'SELECT hit_count, distinct_ip_count, last_ip_address, last_seen_at, avg_interval_seconds, min_interval_seconds
+			 FROM pd_traffic_fingerprint_library
+			 WHERE fingerprint_key = :fingerprint_key
+			 LIMIT 1'
+		);
+		$select->execute(['fingerprint_key' => $fingerprintKey]);
+		$existing = $select->fetch();
+
+		if (!$existing) {
+			$obs = infer_traffic_classification_from_observation($userAgent, 1, 1, null, null);
+			$insert = db()->prepare(
+				'INSERT INTO pd_traffic_fingerprint_library (
+					fingerprint_key, source_type, endpoint_path, user_agent_hash, user_agent_sample,
+					hit_count, distinct_ip_count, last_ip_address, last_seen_at,
+					avg_interval_seconds, min_interval_seconds, classification, confidence, updated_at
+				) VALUES (
+					:fingerprint_key, :source_type, :endpoint_path, :user_agent_hash, :user_agent_sample,
+					1, 1, :last_ip_address, :last_seen_at,
+					NULL, NULL, :classification, :confidence, NOW()
+				)'
+			);
+			$insert->execute([
+				'fingerprint_key' => $fingerprintKey,
+				'source_type' => $sourceType,
+				'endpoint_path' => $requestPath,
+				'user_agent_hash' => $userAgentHash,
+				'user_agent_sample' => $userAgentSample,
+				'last_ip_address' => $ipAddress,
+				'last_seen_at' => $hitAtUtc,
+				'classification' => (string) ($obs['classification'] ?? 'unknown'),
+				'confidence' => (float) ($obs['confidence'] ?? 0),
+			]);
+			return true;
+		}
+
+		$existingHitCount = (int) ($existing['hit_count'] ?? 0);
+		$existingDistinctIpCount = (int) ($existing['distinct_ip_count'] ?? 0);
+		$existingLastIp = trim((string) ($existing['last_ip_address'] ?? ''));
+		$existingLastSeen = parse_db_datetime_utc((string) ($existing['last_seen_at'] ?? ''));
+		$eventSeen = parse_db_datetime_utc($hitAtUtc);
+
+		$intervalSeconds = null;
+		if ($existingLastSeen && $eventSeen) {
+			$intervalSeconds = max(0, $eventSeen->getTimestamp() - $existingLastSeen->getTimestamp());
+		}
+
+		$newHitCount = $existingHitCount + 1;
+		$newDistinctIpCount = $existingDistinctIpCount + (($existingLastIp !== '' && $existingLastIp !== $ipAddress) ? 1 : 0);
+		$avgInterval = $existing['avg_interval_seconds'] !== null ? (float) $existing['avg_interval_seconds'] : null;
+		if ($intervalSeconds !== null) {
+			if ($avgInterval === null || $existingHitCount <= 0) {
+				$avgInterval = (float) $intervalSeconds;
+			} else {
+				$avgInterval = (($avgInterval * max(1, $existingHitCount - 1)) + $intervalSeconds) / max(1, $existingHitCount);
+			}
+		}
+
+		$minInterval = $existing['min_interval_seconds'] !== null ? (int) $existing['min_interval_seconds'] : null;
+		if ($intervalSeconds !== null) {
+			$minInterval = $minInterval === null ? $intervalSeconds : min($minInterval, $intervalSeconds);
+		}
+
+		$obs = infer_traffic_classification_from_observation($userAgent, $newHitCount, $newDistinctIpCount, $avgInterval, $minInterval);
+
+		$update = db()->prepare(
+			'UPDATE pd_traffic_fingerprint_library
+			 SET source_type = :source_type,
+			     endpoint_path = :endpoint_path,
+			     user_agent_hash = :user_agent_hash,
+			     user_agent_sample = :user_agent_sample,
+			     hit_count = :hit_count,
+			     distinct_ip_count = :distinct_ip_count,
+			     last_ip_address = :last_ip_address,
+			     last_seen_at = :last_seen_at,
+			     avg_interval_seconds = :avg_interval_seconds,
+			     min_interval_seconds = :min_interval_seconds,
+			     classification = :classification,
+			     confidence = :confidence,
+			     updated_at = NOW()
+			 WHERE fingerprint_key = :fingerprint_key'
+		);
+		$update->execute([
+			'source_type' => $sourceType,
+			'endpoint_path' => $requestPath,
+			'user_agent_hash' => $userAgentHash,
+			'user_agent_sample' => $userAgentSample,
+			'hit_count' => $newHitCount,
+			'distinct_ip_count' => $newDistinctIpCount,
+			'last_ip_address' => $ipAddress,
+			'last_seen_at' => $hitAtUtc,
+			'avg_interval_seconds' => $avgInterval,
+			'min_interval_seconds' => $minInterval,
+			'classification' => (string) ($obs['classification'] ?? 'unknown'),
+			'confidence' => (float) ($obs['confidence'] ?? 0),
+			'fingerprint_key' => $fingerprintKey,
+		]);
+		return true;
+	} catch (Throwable $e) {
+		return false;
+	}
 }
 
 function match_access_log_referrer_to_hit(array $event): bool
@@ -1532,6 +2090,7 @@ function match_access_log_referrer_to_hit(array $event): bool
 	$ipAddress = trim((string) ($event['ip_address'] ?? ''));
 	$hitAtUtc = trim((string) ($event['hit_at_utc'] ?? ''));
 	$referrer = trim((string) ($event['referrer'] ?? ''));
+	$userAgent = trim((string) ($event['user_agent'] ?? ''));
 	$queryString = trim((string) ($event['query_string'] ?? ''));
 	$requestUri = trim((string) ($event['request_uri'] ?? ''));
 
@@ -1562,12 +2121,14 @@ function match_access_log_referrer_to_hit(array $event): bool
 				$whereClause = ' AND request_uri LIKE :request_uri_like';
 			}
 
+			$uaClause = $userAgent !== '' ? " AND (user_agent = :user_agent OR user_agent IS NULL OR TRIM(user_agent) = '')" : '';
 			$select = db()->prepare(
 				"SELECT id, pixel_id, pixel_key, ip_address, user_agent, request_uri, accept_language, remote_host
 				 FROM pd_pixel_hits
 				 WHERE ip_address = :ip_address
 				   AND (referrer IS NULL OR TRIM(referrer) = '')
 				   AND hit_at BETWEEN :window_start AND :window_end
+				   $uaClause
 				   $whereClause
 				 ORDER BY ABS(TIMESTAMPDIFF(SECOND, hit_at, :event_time)) ASC, id DESC
 				 LIMIT 1"
@@ -1580,6 +2141,9 @@ function match_access_log_referrer_to_hit(array $event): bool
 				$select->bindValue(':query_string', $queryString, PDO::PARAM_STR);
 			} elseif ($requestUri !== '') {
 				$select->bindValue(':request_uri_like', '%' . $requestUri . '%', PDO::PARAM_STR);
+			}
+			if ($userAgent !== '') {
+				$select->bindValue(':user_agent', $userAgent, PDO::PARAM_STR);
 			}
 			$select->execute();
 			$row = $select->fetch();
@@ -1604,6 +2168,7 @@ function match_access_log_referrer_to_hit(array $event): bool
 						'referrer' => $referrer,
 						'request_uri' => (string) ($row['request_uri'] ?? ''),
 						'accept_language' => (string) ($row['accept_language'] ?? ''),
+						'source_type' => 'pixel',
 						'remote_host' => (string) ($row['remote_host'] ?? ''),
 					],
 					false
@@ -1626,12 +2191,14 @@ function match_access_log_referrer_to_hit(array $event): bool
 				$whereClause = ' AND request_uri LIKE :request_uri_like';
 			}
 
+			$uaClause = $userAgent !== '' ? " AND (user_agent = :user_agent OR user_agent IS NULL OR TRIM(user_agent) = '')" : '';
 			$select = db()->prepare(
 				"SELECT id, redirect_id, redirect_key, ip_address, user_agent, request_uri, accept_language, remote_host
 				 FROM pd_redirect_hits
 				 WHERE ip_address = :ip_address
 				   AND (referrer IS NULL OR TRIM(referrer) = '')
 				   AND hit_at BETWEEN :window_start AND :window_end
+				   $uaClause
 				   $whereClause
 				 ORDER BY ABS(TIMESTAMPDIFF(SECOND, hit_at, :event_time)) ASC, id DESC
 				 LIMIT 1"
@@ -1644,6 +2211,9 @@ function match_access_log_referrer_to_hit(array $event): bool
 				$select->bindValue(':query_string', $queryString, PDO::PARAM_STR);
 			} elseif ($requestUri !== '') {
 				$select->bindValue(':request_uri_like', '%' . $requestUri . '%', PDO::PARAM_STR);
+			}
+			if ($userAgent !== '') {
+				$select->bindValue(':user_agent', $userAgent, PDO::PARAM_STR);
 			}
 			$select->execute();
 			$row = $select->fetch();
@@ -1668,6 +2238,7 @@ function match_access_log_referrer_to_hit(array $event): bool
 						'referrer' => $referrer,
 						'request_uri' => (string) ($row['request_uri'] ?? ''),
 						'accept_language' => (string) ($row['accept_language'] ?? ''),
+						'source_type' => 'redirect',
 						'remote_host' => (string) ($row['remote_host'] ?? ''),
 					],
 					false
@@ -1736,6 +2307,9 @@ function process_access_log_referrer_enrichment(int $maxLines = 2500): array
 	$processedLines = 0;
 	$matchedEvents = 0;
 	$updatedHits = 0;
+	$attributedHits = 0;
+	$fingerprintUpdates = 0;
+	$actorReferrerChain = [];
 
 	while (!feof($handle) && $processedLines < $maxLines) {
 		$line = fgets($handle);
@@ -1749,14 +2323,38 @@ function process_access_log_referrer_enrichment(int $maxLines = 2500): array
 			$offset = $currentOffset;
 		}
 
-		$event = parse_apache_access_log_line($line);
-		if (!$event) {
+		$rawEvent = parse_apache_access_log_raw_line($line);
+		if (!$rawEvent) {
 			continue;
 		}
 
+		$actorKey = trim((string) ($rawEvent['ip_address'] ?? '')) . '|' . sha1(strtolower(trim((string) ($rawEvent['user_agent'] ?? ''))));
+		$rawReferrer = normalize_source_attribution_value((string) ($rawEvent['referrer'] ?? ''));
+		if ($rawReferrer !== '') {
+			$actorReferrerChain[$actorKey] = [
+				'referrer' => $rawReferrer,
+				'seen_at' => (string) ($rawEvent['hit_at_utc'] ?? ''),
+			];
+		}
+
+		if (!in_array((string) ($rawEvent['source_type'] ?? ''), ['pixel', 'redirect'], true)) {
+			continue;
+		}
+
+		$event = $rawEvent;
+		if (trim((string) ($event['referrer'] ?? '')) === '') {
+			$event['referrer'] = derive_source_attribution_referrer($event, $actorReferrerChain[$actorKey] ?? null);
+		}
+
 		$matchedEvents++;
+		if (record_traffic_fingerprint_observation($event)) {
+			$fingerprintUpdates++;
+		}
 		if (match_access_log_referrer_to_hit($event)) {
 			$updatedHits++;
+			if (extract_source_attribution_from_query((string) ($event['query_string'] ?? '')) !== '') {
+				$attributedHits++;
+			}
 		}
 	}
 
@@ -1769,6 +2367,8 @@ function process_access_log_referrer_enrichment(int $maxLines = 2500): array
 		'processed_lines' => $processedLines,
 		'matched_events' => $matchedEvents,
 		'updated_hits' => $updatedHits,
+		'attributed_hits' => $attributedHits,
+		'fingerprint_updates' => $fingerprintUpdates,
 	];
 }
 
@@ -1860,6 +2460,10 @@ function process_ip_enrichment_queue(int $maxRows = 100, int $maxRuntimeSeconds 
 					try {
 						$enrichment = ensure_ip_enrichment($ipAddress, true);
 						$source = (string) ($enrichment['source'] ?? 'unresolved');
+						$resolvedHost = ensure_reverse_host_for_ip($ipAddress, true);
+						if ($resolvedHost !== null && $resolvedHost !== '') {
+							backfill_remote_host_for_ip_hits($ipAddress, $resolvedHost, 250);
+						}
 
 						if ($source !== 'unresolved') {
 							$deleteStmt->execute(['ip_address' => $ipAddress]);

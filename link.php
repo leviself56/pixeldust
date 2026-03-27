@@ -93,7 +93,7 @@ if ($referrer === '') {
 $requestUri = (string) ($_SERVER['REQUEST_URI'] ?? '');
 $queryString = (string) ($_SERVER['QUERY_STRING'] ?? '');
 $acceptLanguage = substr((string) ($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? ''), 0, 255);
-$remoteHost = substr((string) @gethostbyaddr($ipAddress), 0, 255);
+$remoteHost = substr((string) ($_SERVER['REMOTE_HOST'] ?? ''), 0, 255);
 
 $insertHit = db()->prepare(
 	'INSERT INTO pd_redirect_hits (
