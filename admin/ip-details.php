@@ -778,7 +778,8 @@ render_header('IP Drilldown');
 	<div class="card">
 		<h3>Recent Hits</h3>
 		<p class="muted">Showing <?php echo number_format($recentDisplayStart); ?>-<?php echo number_format($recentDisplayEnd); ?> of <?php echo number_format($recentTotalRows); ?> hits.</p>
-		<table>
+		<div style="overflow-x:auto; max-width:100%;">
+		<table style="width:100%; table-layout:fixed;">
 			<thead><tr><th>Date/Time</th><th>Source</th><th>Referrer</th><th>User Agent</th><th>Remote Host</th></tr></thead>
 			<tbody>
 			<?php if (!$recentRows): ?>
@@ -791,16 +792,17 @@ render_header('IP Drilldown');
 					$recentSourceLabel = ucfirst($recentSourceType) . ($recentSourceKey !== '' ? ': ' . $recentSourceKey : '');
 					?>
 					<tr>
-						<td><?php echo e(format_db_datetime((string) ($row['hit_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
-						<td><?php echo e($recentSourceLabel); ?></td>
-						<td><?php echo e((string) (($row['referrer'] ?? '') !== '' ? $row['referrer'] : '-')); ?></td>
-						<td><?php echo e((string) (($row['user_agent'] ?? '') !== '' ? $row['user_agent'] : '-')); ?></td>
-						<td><?php echo e((string) (($row['remote_host'] ?? '') !== '' ? $row['remote_host'] : '-')); ?></td>
+						<td style="white-space:nowrap;"><?php echo e(format_db_datetime((string) ($row['hit_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
+						<td style="white-space:nowrap; overflow-wrap:anywhere; word-break:break-word;"><?php echo e($recentSourceLabel); ?></td>
+						<td style="overflow-wrap:anywhere; word-break:break-word;"><?php echo e((string) (($row['referrer'] ?? '') !== '' ? $row['referrer'] : '-')); ?></td>
+						<td style="overflow-wrap:anywhere; word-break:break-word;"><?php echo e((string) (($row['user_agent'] ?? '') !== '' ? $row['user_agent'] : '-')); ?></td>
+						<td style="overflow-wrap:anywhere; word-break:break-word;"><?php echo e((string) (($row['remote_host'] ?? '') !== '' ? $row['remote_host'] : '-')); ?></td>
 					</tr>
 				<?php endforeach; ?>
 			<?php endif; ?>
 			</tbody>
 		</table>
+		</div>
 		<?php if ($recentTotalPages > 1): ?>
 			<?php $recentBaseParams = ['ip' => $ipAddress, 'period' => $period]; ?>
 			<div class="inline" style="margin-top:10px;">
