@@ -793,7 +793,7 @@ render_header('IP Drilldown');
 					?>
 					<tr>
 						<td style="white-space:nowrap;"><?php echo e(format_db_datetime((string) ($row['hit_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
-						<td style="white-space:nowrap; overflow-wrap:anywhere; word-break:break-word;"><?php echo e($recentSourceLabel); ?></td>
+						<td style="white-space:normal; overflow-wrap:anywhere; word-break:break-word;"><?php echo e($recentSourceLabel); ?></td>
 						<td style="overflow-wrap:anywhere; word-break:break-word;"><?php echo e((string) (($row['referrer'] ?? '') !== '' ? $row['referrer'] : '-')); ?></td>
 						<td style="overflow-wrap:anywhere; word-break:break-word;"><?php echo e((string) (($row['user_agent'] ?? '') !== '' ? $row['user_agent'] : '-')); ?></td>
 						<td style="overflow-wrap:anywhere; word-break:break-word;"><?php echo e((string) (($row['remote_host'] ?? '') !== '' ? $row['remote_host'] : '-')); ?></td>
