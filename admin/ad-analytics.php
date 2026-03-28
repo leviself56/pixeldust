@@ -180,8 +180,9 @@ if ($schemaReady) {
 	}
 
 	$recentStmt = db()->prepare(
-		"SELECT id, hit_at, ad_key, ip_address, traffic_type, country_code, isp_name, matched, matched_rule_name, matched_action_type, referrer
-		 FROM pd_ad_hit_logs
+		"SELECT l.id, l.hit_at, l.ad_key, l.ip_address, l.traffic_type, l.country_code, l.isp_name, l.matched, l.matched_action_type, l.referrer, r.priority AS matched_priority
+		 FROM pd_ad_hit_logs l
+		 LEFT JOIN pd_ad_rules r ON r.id = l.matched_rule_id
 		 WHERE $whereSql
 		 ORDER BY $orderBy
 		 LIMIT :offset, :limit"
@@ -364,7 +365,7 @@ render_header('Targeted Ad Analytics');
 			<th>Time</th>
 			<th>Ad ID</th>
 			<th>Match</th>
-			<th>Rule</th>
+			<th>Priority</th>
 			<th>Action</th>
 			<th>IP</th>
 			<th>Provider</th>
@@ -381,12 +382,15 @@ render_header('Targeted Ad Analytics');
 				<?php
 				$referrerValue = trim((string) ($row['referrer'] ?? ''));
 				$referrerLabel = normalize_referrer_domain($referrerValue !== '' ? $referrerValue : null);
+				$priorityLabel = (int) ($row['matched'] ?? 0) === 1 && isset($row['matched_priority']) && $row['matched_priority'] !== null
+					? (string) ((int) $row['matched_priority'])
+					: '-';
 				?>
 				<tr>
 					<td><?php echo e($formatStoredLocalTime((string) ($row['hit_at'] ?? ''))); ?></td>
 					<td><?php echo e((string) ($row['ad_key'] ?? '')); ?></td>
 					<td><?php echo (int) ($row['matched'] ?? 0) === 1 ? 'Matched' : 'Unmatched'; ?></td>
-					<td><?php echo e((string) ($row['matched_rule_name'] ?? '-')); ?></td>
+					<td><?php echo e($priorityLabel); ?></td>
 					<td><?php echo e((string) ($row['matched_action_type'] ?? '-')); ?></td>
 					<td><?php echo e((string) ($row['ip_address'] ?? '')); ?></td>
 					<td><?php echo e((string) (($row['isp_name'] ?? '') !== '' ? $row['isp_name'] : 'unknown')); ?></td>
