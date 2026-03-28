@@ -388,6 +388,15 @@ render_header('Targeted Advertising');
 <?php endif; ?>
 
 <div class="card">
+	<h2>Priority Strategy</h2>
+	<p class="muted">Lower priority values run first. First matching rule wins.</p>
+	<ul class="muted" style="margin:0;padding-left:18px;">
+		<li><strong>Example A:</strong> same Ad ID, priority <strong>10</strong> for specific audience, priority <strong>100</strong> as default fallback.</li>
+		<li><strong>Example B:</strong> same Ad ID, priority <strong>5</strong> for known operator tags, priority <strong>20</strong> for country/region, priority <strong>100</strong> catch-all.</li>
+	</ul>
+</div>
+
+<div class="card">
 	<h2><?php echo $editingRule ? 'Edit Ad Rule' : 'Create Ad Rule'; ?></h2>
 	<form method="post">
 		<input type="hidden" name="action" value="save_rule">
