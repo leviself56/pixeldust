@@ -87,6 +87,7 @@ $topReferrers = [];
 $topProviders = [];
 $topIps = [];
 $recentRows = [];
+$ipTagMap = [];
 $totalRows = 0;
 $totalPages = 1;
 
@@ -213,6 +214,21 @@ if ($schemaReady) {
 	$recentStmt->bindValue(':limit', $perPage, PDO::PARAM_INT);
 	$recentStmt->execute();
 	$recentRows = $recentStmt->fetchAll();
+
+	$ipsForTagLookup = [];
+	foreach ($topIps as $topIpRow) {
+		$ipValue = trim((string) ($topIpRow['ip_address'] ?? ''));
+		if ($ipValue !== '') {
+			$ipsForTagLookup[] = $ipValue;
+		}
+	}
+	foreach ($recentRows as $recentRow) {
+		$ipValue = trim((string) ($recentRow['ip_address'] ?? ''));
+		if ($ipValue !== '') {
+			$ipsForTagLookup[] = $ipValue;
+		}
+	}
+	$ipTagMap = fetch_ip_operator_tags($ipsForTagLookup);
 }
 
 $displayStart = 0;
@@ -362,8 +378,9 @@ render_header('Targeted Ad Analytics');
 			<?php else: ?>
 				<?php foreach ($topIps as $row): ?>
 					<?php $ipValue = (string) ($row['ip_address'] ?? ''); ?>
+					<?php $ipDisplay = format_ip_with_operator_tag($ipValue, (string) ($ipTagMap[$ipValue] ?? '')); ?>
 					<tr>
-						<td><?php echo e($ipValue); ?></td>
+						<td><a href="ad-linkout.php?type=ip&amp;value=<?php echo urlencode($ipValue); ?>&amp;period=<?php echo urlencode($period); ?>"><?php echo e($ipDisplay !== '' ? $ipDisplay : $ipValue); ?></a></td>
 						<td><?php echo number_format((int) ($row['hits'] ?? 0)); ?></td>
 						<td><?php echo number_format((int) ($row['matched_hits'] ?? 0)); ?></td>
 						<td><a class="nav-btn" href="ad-linkout.php?type=ip&amp;value=<?php echo urlencode($ipValue); ?>&amp;period=<?php echo urlencode($period); ?>">Open IP details</a></td>
@@ -399,6 +416,8 @@ render_header('Targeted Ad Analytics');
 		<?php else: ?>
 			<?php foreach ($recentRows as $row): ?>
 				<?php
+				$ipValue = (string) ($row['ip_address'] ?? '');
+				$ipDisplay = format_ip_with_operator_tag($ipValue, (string) ($ipTagMap[$ipValue] ?? ''));
 				$referrerValue = trim((string) ($row['referrer'] ?? ''));
 				$referrerLabel = normalize_referrer_domain($referrerValue !== '' ? $referrerValue : null);
 				$priorityLabel = (int) ($row['matched'] ?? 0) === 1 && isset($row['matched_priority']) && $row['matched_priority'] !== null
@@ -411,7 +430,7 @@ render_header('Targeted Ad Analytics');
 					<td><?php echo (int) ($row['matched'] ?? 0) === 1 ? 'Matched' : 'Unmatched'; ?></td>
 					<td><?php echo e($priorityLabel); ?></td>
 					<td><?php echo e((string) ($row['matched_action_type'] ?? '-')); ?></td>
-					<td><?php echo e((string) ($row['ip_address'] ?? '')); ?></td>
+					<td><a href="ad-linkout.php?type=ip&amp;value=<?php echo urlencode($ipValue); ?>&amp;period=<?php echo urlencode($period); ?>"><?php echo e($ipDisplay !== '' ? $ipDisplay : $ipValue); ?></a></td>
 					<td><?php echo e((string) (($row['isp_name'] ?? '') !== '' ? $row['isp_name'] : 'unknown')); ?></td>
 					<td><?php echo e((string) ($row['traffic_type'] ?? 'unknown')); ?></td>
 					<td><?php echo e((string) (($row['country_code'] ?? '') !== '' ? $row['country_code'] : '-')); ?></td>
