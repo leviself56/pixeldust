@@ -119,6 +119,8 @@ if ($schemaReady && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
 			$conditions = normalize_ad_match_conditions([
 				'traffic_type' => (string) ($_POST['traffic_type'] ?? ''),
+				'user_agent_op' => (string) ($_POST['user_agent_op'] ?? 'equals'),
+				'user_agent_value' => (string) ($_POST['user_agent_value'] ?? ''),
 				'ip_address_op' => (string) ($_POST['ip_address_op'] ?? 'equals'),
 				'ip_address_value' => (string) ($_POST['ip_address_value'] ?? ''),
 				'operator_tag' => (string) ($_POST['operator_tag'] ?? ''),
@@ -414,6 +416,17 @@ render_header('Targeted Advertising');
 						</select>
 					</td>
 					<td class="muted">Matches inferred traffic classification.</td>
+				</tr>
+				<tr>
+					<td>user_agent</td>
+					<td>
+						<select name="user_agent_op">
+							<option value="equals" <?php echo $op($editingConditions, 'user_agent') === 'equals' ? 'selected' : ''; ?>>equals</option>
+							<option value="like" <?php echo $op($editingConditions, 'user_agent') === 'like' ? 'selected' : ''; ?>>LIKE</option>
+						</select>
+					</td>
+					<td><input type="text" name="user_agent_value" maxlength="255" value="<?php echo e($val($editingConditions, 'user_agent')); ?>" placeholder="Mozilla/5.0 or %iPhone%"></td>
+					<td class="muted">Match browser/client user-agent string.</td>
 				</tr>
 				<tr>
 					<td>ip_address</td>

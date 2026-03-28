@@ -3139,6 +3139,7 @@ function normalize_ad_match_conditions(array $input): array
 	}
 
 	$fieldConfig = [
+		'user_agent' => ['ops' => ['equals', 'like'], 'max' => 255],
 		'ip_address' => ['ops' => ['equals', 'like'], 'max' => 191],
 		'country_code' => ['ops' => ['equals', 'like'], 'max' => 2],
 		'region' => ['ops' => ['equals', 'like'], 'max' => 120],
@@ -3229,6 +3230,7 @@ function ad_rule_matches_context(array $conditions, array $context): bool
 {
 	$flatContext = [
 		'traffic_type' => trim((string) ($context['traffic_type'] ?? '')),
+		'user_agent' => trim((string) ($context['user_agent'] ?? '')),
 		'ip_address' => trim((string) ($context['ip_address'] ?? '')),
 		'operator_tag' => trim((string) ($context['operator_tag'] ?? '')),
 		'country_code' => strtoupper(trim((string) ($context['country_code'] ?? ''))),

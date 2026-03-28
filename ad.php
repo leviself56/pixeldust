@@ -66,6 +66,7 @@ $trafficType = infer_traffic_type([
 
 $context = [
 	'traffic_type' => $trafficType,
+	'user_agent' => trim($userAgent),
 	'ip_address' => $ipAddress,
 	'operator_tag' => trim((string) ($enrichment['operator_tag'] ?? '')),
 	'country_code' => strtoupper(trim((string) ($enrichment['country_code'] ?? ''))),
