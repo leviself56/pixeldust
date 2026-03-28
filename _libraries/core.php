@@ -561,6 +561,68 @@ function run_schema_migrations(PDO $pdo): array
 		$applied[] = 'Created table pd_traffic_fingerprint_library';
 	}
 
+	if (!table_exists($pdo, 'pd_ad_rules')) {
+		$pdo->exec(
+			'CREATE TABLE pd_ad_rules (
+				id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+				ad_key VARCHAR(191) NOT NULL,
+				rule_name VARCHAR(191) NOT NULL,
+				priority INT NOT NULL DEFAULT 100,
+				match_conditions TEXT NULL,
+				custom_js LONGTEXT NOT NULL,
+				action_type VARCHAR(40) NOT NULL DEFAULT "custom_js",
+				action_value LONGTEXT NULL,
+				run_once_enabled TINYINT(1) NOT NULL DEFAULT 0,
+				run_once_period_seconds INT UNSIGNED NULL,
+				trigger_on_match TINYINT(1) NOT NULL DEFAULT 0,
+				trigger_id VARCHAR(191) NULL,
+				is_active TINYINT(1) NOT NULL DEFAULT 1,
+				created_by INT UNSIGNED NULL,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				INDEX idx_ad_key_active (ad_key, is_active, priority),
+				INDEX idx_trigger_id (trigger_id)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+		);
+		$applied[] = 'Created table pd_ad_rules';
+	}
+
+	if (!table_exists($pdo, 'pd_ad_hit_logs')) {
+		$pdo->exec(
+			'CREATE TABLE pd_ad_hit_logs (
+				id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+				ad_key VARCHAR(191) NOT NULL,
+				hit_at DATETIME NOT NULL,
+				ip_address VARCHAR(45) NOT NULL,
+				user_agent TEXT NULL,
+				referrer TEXT NULL,
+				request_uri TEXT NULL,
+				query_string TEXT NULL,
+				accept_language VARCHAR(255) NULL,
+				remote_host VARCHAR(255) NULL,
+				traffic_type VARCHAR(30) NOT NULL DEFAULT "unknown",
+				operator_tag VARCHAR(191) NULL,
+				country_code CHAR(2) NULL,
+				region VARCHAR(120) NULL,
+				city VARCHAR(120) NULL,
+				asn VARCHAR(20) NULL,
+				asn_org VARCHAR(255) NULL,
+				isp_name VARCHAR(255) NULL,
+				reverse_host VARCHAR(255) NULL,
+				matched TINYINT(1) NOT NULL DEFAULT 0,
+				matched_rule_id INT UNSIGNED NULL,
+				matched_rule_name VARCHAR(191) NULL,
+				matched_action_type VARCHAR(40) NULL,
+				created_at DATETIME NOT NULL,
+				INDEX idx_ad_key_time (ad_key, hit_at),
+				INDEX idx_matched_time (matched, hit_at),
+				INDEX idx_ip_time (ip_address, hit_at),
+				INDEX idx_provider_time (isp_name(191), hit_at)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+		);
+		$applied[] = 'Created table pd_ad_hit_logs';
+	}
+
 	$pixelColumns = [
 		'label' => 'ALTER TABLE pd_pixels ADD COLUMN label VARCHAR(191) NOT NULL DEFAULT "" AFTER pixel_key',
 		'created_by' => 'ALTER TABLE pd_pixels ADD COLUMN created_by INT UNSIGNED NULL AFTER label',
@@ -783,6 +845,64 @@ function run_schema_migrations(PDO $pdo): array
 		}
 	}
 
+	$adRuleColumns = [
+		'ad_key' => 'ALTER TABLE pd_ad_rules ADD COLUMN ad_key VARCHAR(191) NOT NULL AFTER id',
+		'rule_name' => 'ALTER TABLE pd_ad_rules ADD COLUMN rule_name VARCHAR(191) NOT NULL AFTER ad_key',
+		'priority' => 'ALTER TABLE pd_ad_rules ADD COLUMN priority INT NOT NULL DEFAULT 100 AFTER rule_name',
+		'match_conditions' => 'ALTER TABLE pd_ad_rules ADD COLUMN match_conditions TEXT NULL AFTER priority',
+		'custom_js' => 'ALTER TABLE pd_ad_rules ADD COLUMN custom_js LONGTEXT NOT NULL AFTER match_conditions',
+		'action_type' => 'ALTER TABLE pd_ad_rules ADD COLUMN action_type VARCHAR(40) NOT NULL DEFAULT "custom_js" AFTER custom_js',
+		'action_value' => 'ALTER TABLE pd_ad_rules ADD COLUMN action_value LONGTEXT NULL AFTER action_type',
+		'run_once_enabled' => 'ALTER TABLE pd_ad_rules ADD COLUMN run_once_enabled TINYINT(1) NOT NULL DEFAULT 0 AFTER action_value',
+		'run_once_period_seconds' => 'ALTER TABLE pd_ad_rules ADD COLUMN run_once_period_seconds INT UNSIGNED NULL AFTER run_once_enabled',
+		'trigger_on_match' => 'ALTER TABLE pd_ad_rules ADD COLUMN trigger_on_match TINYINT(1) NOT NULL DEFAULT 0 AFTER run_once_period_seconds',
+		'trigger_id' => 'ALTER TABLE pd_ad_rules ADD COLUMN trigger_id VARCHAR(191) NULL AFTER trigger_on_match',
+		'is_active' => 'ALTER TABLE pd_ad_rules ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER trigger_id',
+		'created_by' => 'ALTER TABLE pd_ad_rules ADD COLUMN created_by INT UNSIGNED NULL AFTER is_active',
+		'created_at' => 'ALTER TABLE pd_ad_rules ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER created_by',
+		'updated_at' => 'ALTER TABLE pd_ad_rules ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER created_at',
+	];
+
+	foreach ($adRuleColumns as $column => $sql) {
+		if (!column_exists($pdo, 'pd_ad_rules', $column)) {
+			$pdo->exec($sql);
+			$applied[] = 'Added column pd_ad_rules.' . $column;
+		}
+	}
+
+	$adHitLogColumns = [
+		'ad_key' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN ad_key VARCHAR(191) NOT NULL AFTER id',
+		'hit_at' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN hit_at DATETIME NOT NULL AFTER ad_key',
+		'ip_address' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN ip_address VARCHAR(45) NOT NULL AFTER hit_at',
+		'user_agent' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN user_agent TEXT NULL AFTER ip_address',
+		'referrer' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN referrer TEXT NULL AFTER user_agent',
+		'request_uri' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN request_uri TEXT NULL AFTER referrer',
+		'query_string' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN query_string TEXT NULL AFTER request_uri',
+		'accept_language' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN accept_language VARCHAR(255) NULL AFTER query_string',
+		'remote_host' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN remote_host VARCHAR(255) NULL AFTER accept_language',
+		'traffic_type' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN traffic_type VARCHAR(30) NOT NULL DEFAULT "unknown" AFTER remote_host',
+		'operator_tag' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN operator_tag VARCHAR(191) NULL AFTER traffic_type',
+		'country_code' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN country_code CHAR(2) NULL AFTER operator_tag',
+		'region' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN region VARCHAR(120) NULL AFTER country_code',
+		'city' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN city VARCHAR(120) NULL AFTER region',
+		'asn' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN asn VARCHAR(20) NULL AFTER city',
+		'asn_org' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN asn_org VARCHAR(255) NULL AFTER asn',
+		'isp_name' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN isp_name VARCHAR(255) NULL AFTER asn_org',
+		'reverse_host' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN reverse_host VARCHAR(255) NULL AFTER isp_name',
+		'matched' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN matched TINYINT(1) NOT NULL DEFAULT 0 AFTER reverse_host',
+		'matched_rule_id' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN matched_rule_id INT UNSIGNED NULL AFTER matched',
+		'matched_rule_name' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN matched_rule_name VARCHAR(191) NULL AFTER matched_rule_id',
+		'matched_action_type' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN matched_action_type VARCHAR(40) NULL AFTER matched_rule_name',
+		'created_at' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER matched_action_type',
+	];
+
+	foreach ($adHitLogColumns as $column => $sql) {
+		if (!column_exists($pdo, 'pd_ad_hit_logs', $column)) {
+			$pdo->exec($sql);
+			$applied[] = 'Added column pd_ad_hit_logs.' . $column;
+		}
+	}
+
 	$indexes = [
 		['table' => 'pd_pixels', 'name' => 'idx_pixel_key', 'sql' => 'CREATE INDEX idx_pixel_key ON pd_pixels (pixel_key)'],
 		['table' => 'pd_pixel_hits', 'name' => 'idx_pixel_id', 'sql' => 'CREATE INDEX idx_pixel_id ON pd_pixel_hits (pixel_id)'],
@@ -822,6 +942,12 @@ function run_schema_migrations(PDO $pdo): array
 		['table' => 'pd_traffic_fingerprint_library', 'name' => 'idx_source_type', 'sql' => 'CREATE INDEX idx_source_type ON pd_traffic_fingerprint_library (source_type)'],
 		['table' => 'pd_traffic_fingerprint_library', 'name' => 'idx_classification', 'sql' => 'CREATE INDEX idx_classification ON pd_traffic_fingerprint_library (classification)'],
 		['table' => 'pd_traffic_fingerprint_library', 'name' => 'idx_last_seen', 'sql' => 'CREATE INDEX idx_last_seen ON pd_traffic_fingerprint_library (last_seen_at)'],
+		['table' => 'pd_ad_rules', 'name' => 'idx_ad_key_active', 'sql' => 'CREATE INDEX idx_ad_key_active ON pd_ad_rules (ad_key, is_active, priority)'],
+		['table' => 'pd_ad_rules', 'name' => 'idx_trigger_id', 'sql' => 'CREATE INDEX idx_trigger_id ON pd_ad_rules (trigger_id)'],
+		['table' => 'pd_ad_hit_logs', 'name' => 'idx_ad_key_time', 'sql' => 'CREATE INDEX idx_ad_key_time ON pd_ad_hit_logs (ad_key, hit_at)'],
+		['table' => 'pd_ad_hit_logs', 'name' => 'idx_matched_time', 'sql' => 'CREATE INDEX idx_matched_time ON pd_ad_hit_logs (matched, hit_at)'],
+		['table' => 'pd_ad_hit_logs', 'name' => 'idx_ip_time', 'sql' => 'CREATE INDEX idx_ip_time ON pd_ad_hit_logs (ip_address, hit_at)'],
+		['table' => 'pd_ad_hit_logs', 'name' => 'idx_provider_time', 'sql' => 'CREATE INDEX idx_provider_time ON pd_ad_hit_logs (isp_name(191), hit_at)'],
 	];
 
 	foreach ($indexes as $indexDef) {
@@ -2969,6 +3095,217 @@ function normalize_trigger_id(string $triggerId): string
 	return trim($triggerId);
 }
 
+function sanitize_ad_key(string $adKey): string
+{
+	$adKey = trim($adKey);
+	if ($adKey === '') {
+		return '';
+	}
+
+	if (function_exists('mb_strtolower')) {
+		$adKey = mb_strtolower($adKey, 'UTF-8');
+	} else {
+		$adKey = strtolower($adKey);
+	}
+
+	$adKey = preg_replace('/[^a-z0-9_-]/', '', $adKey);
+	$adKey = trim((string) $adKey, '_-');
+
+	if (strlen($adKey) > 191) {
+		$adKey = substr($adKey, 0, 191);
+	}
+
+	return $adKey;
+}
+
+function normalize_ad_match_conditions(array $input): array
+{
+	$normalized = [];
+
+	$trafficType = trim((string) ($input['traffic_type'] ?? ''));
+	if (in_array($trafficType, ['human', 'proxy'], true)) {
+		$normalized['traffic_type'] = [
+			'op' => 'equals',
+			'value' => $trafficType,
+		];
+	}
+
+	$operatorTag = trim((string) ($input['operator_tag'] ?? ''));
+	if ($operatorTag !== '') {
+		$normalized['operator_tag'] = [
+			'op' => 'equals',
+			'value' => $operatorTag,
+		];
+	}
+
+	$fieldConfig = [
+		'ip_address' => ['ops' => ['equals', 'like'], 'max' => 191],
+		'country_code' => ['ops' => ['equals', 'like'], 'max' => 2],
+		'region' => ['ops' => ['equals', 'like'], 'max' => 120],
+		'city' => ['ops' => ['equals', 'like'], 'max' => 120],
+		'asn' => ['ops' => ['equals'], 'max' => 20],
+		'asn_org' => ['ops' => ['equals', 'like'], 'max' => 255],
+		'isp_name' => ['ops' => ['equals', 'like'], 'max' => 255],
+		'reverse_host' => ['ops' => ['equals', 'like'], 'max' => 255],
+	];
+
+	foreach ($fieldConfig as $field => $cfg) {
+		$structuredRaw = $input[$field] ?? null;
+		if (is_array($structuredRaw)) {
+			$op = trim((string) ($structuredRaw['op'] ?? 'equals'));
+			$value = trim((string) ($structuredRaw['value'] ?? ''));
+		} else {
+			$legacyRaw = $input[$field] ?? '';
+			$legacyValue = is_scalar($legacyRaw) ? trim((string) $legacyRaw) : '';
+			$op = trim((string) ($input[$field . '_op'] ?? 'equals'));
+			$value = trim((string) ($input[$field . '_value'] ?? $legacyValue));
+		}
+
+		if ($value === '') {
+			continue;
+		}
+
+		if (!in_array($op, $cfg['ops'], true)) {
+			$op = 'equals';
+		}
+
+		if ($field === 'country_code') {
+			$value = strtoupper($value);
+		}
+
+		$maxLength = (int) ($cfg['max'] ?? 191);
+		if ($maxLength > 0 && strlen($value) > $maxLength) {
+			$value = substr($value, 0, $maxLength);
+		}
+
+		$normalized[$field] = [
+			'op' => $op,
+			'value' => $value,
+		];
+	}
+
+	return $normalized;
+}
+
+function decode_ad_match_conditions(?string $json): array
+{
+	if ($json === null || trim($json) === '') {
+		return [];
+	}
+
+	$decoded = json_decode($json, true);
+	if (!is_array($decoded)) {
+		return [];
+	}
+
+	return normalize_ad_match_conditions($decoded);
+}
+
+function ad_condition_value_matches(string $actual, string $operator, string $expected): bool
+{
+	$actualValue = trim($actual);
+	$expectedValue = trim($expected);
+	if ($expectedValue === '') {
+		return true;
+	}
+
+	$op = strtolower(trim($operator));
+	if ($op !== 'like') {
+		return strtolower($actualValue) === strtolower($expectedValue);
+	}
+
+	$actualLower = strtolower($actualValue);
+	$expectedLower = strtolower($expectedValue);
+	if (strpos($expectedLower, '%') !== false || strpos($expectedLower, '_') !== false) {
+		$pattern = preg_quote($expectedLower, '/');
+		$pattern = str_replace(['%', '_'], ['.*', '.'], $pattern);
+		return (bool) preg_match('/^' . $pattern . '$/i', $actualLower);
+	}
+
+	return strpos($actualLower, $expectedLower) !== false;
+}
+
+function ad_rule_matches_context(array $conditions, array $context): bool
+{
+	$flatContext = [
+		'traffic_type' => trim((string) ($context['traffic_type'] ?? '')),
+		'ip_address' => trim((string) ($context['ip_address'] ?? '')),
+		'operator_tag' => trim((string) ($context['operator_tag'] ?? '')),
+		'country_code' => strtoupper(trim((string) ($context['country_code'] ?? ''))),
+		'region' => trim((string) ($context['region'] ?? '')),
+		'city' => trim((string) ($context['city'] ?? '')),
+		'asn' => trim((string) ($context['asn'] ?? '')),
+		'asn_org' => trim((string) ($context['asn_org'] ?? '')),
+		'isp_name' => trim((string) ($context['isp_name'] ?? '')),
+		'reverse_host' => trim((string) ($context['reverse_host'] ?? '')),
+	];
+
+	foreach ($conditions as $field => $rule) {
+		if (!is_array($rule)) {
+			continue;
+		}
+
+		$expectedValue = trim((string) ($rule['value'] ?? ''));
+		if ($expectedValue === '') {
+			continue;
+		}
+
+		$operator = trim((string) ($rule['op'] ?? 'equals'));
+		$actualValue = trim((string) ($flatContext[$field] ?? ''));
+		if (!ad_condition_value_matches($actualValue, $operator, $expectedValue)) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+function render_ad_rule_javascript(string $actionType, ?string $actionValue, ?string $customJs): string
+{
+	$normalizedActionType = trim(strtolower($actionType));
+	$actionPayload = trim((string) $actionValue);
+	$rawCustomJs = trim((string) $customJs);
+
+	if ($normalizedActionType === 'inline_image') {
+		if ($actionPayload === '' || !filter_var($actionPayload, FILTER_VALIDATE_URL)) {
+			return '/* ad.js: inline image url invalid */';
+		}
+		$jsonUrl = json_encode($actionPayload, JSON_UNESCAPED_SLASHES);
+		if (!is_string($jsonUrl)) {
+			return '/* ad.js: inline image url encode failed */';
+		}
+		return '(function(){var u=' . $jsonUrl . ';if(!u){return;}var mount=function(){var target=document.body;if(!target){return false;}var img=document.createElement("img");img.src=u;img.alt="";img.style.maxWidth="100%";img.style.height="auto";img.style.display="block";img.style.margin="12px auto";target.appendChild(img);return true;};if(!mount()){if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",mount,{once:true});}else{setTimeout(mount,40);}}})();';
+	}
+
+	if ($normalizedActionType === 'popup_image') {
+		if ($actionPayload === '' || !filter_var($actionPayload, FILTER_VALIDATE_URL)) {
+			return '/* ad.js: popup image url invalid */';
+		}
+		$jsonUrl = json_encode($actionPayload, JSON_UNESCAPED_SLASHES);
+		if (!is_string($jsonUrl)) {
+			return '/* ad.js: popup image url encode failed */';
+		}
+		return '(function(){var u=' . $jsonUrl . ';if(!u||document.getElementById("pd-ad-overlay")){return;}var o=document.createElement("div");o.id="pd-ad-overlay";o.style.position="fixed";o.style.inset="0";o.style.background="rgba(0,0,0,.75)";o.style.display="flex";o.style.alignItems="center";o.style.justifyContent="center";o.style.zIndex="2147483647";var img=document.createElement("img");img.src=u;img.alt="";img.style.maxWidth="92vw";img.style.maxHeight="92vh";img.style.boxShadow="0 16px 40px rgba(0,0,0,.45)";img.style.borderRadius="8px";img.style.background="#fff";img.style.padding="6px";o.appendChild(img);o.addEventListener("click",function(){o.remove();});(document.body||document.documentElement).appendChild(o);})();';
+	}
+
+	if ($normalizedActionType === 'popup_text_html') {
+		if ($actionPayload === '') {
+			return '/* ad.js: popup text html empty */';
+		}
+		$jsonHtml = json_encode($actionPayload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+		if (!is_string($jsonHtml)) {
+			return '/* ad.js: popup text html encode failed */';
+		}
+		return '(function(){if(document.getElementById("pd-ad-overlay")){return;}var h=' . $jsonHtml . ';var o=document.createElement("div");o.id="pd-ad-overlay";o.style.position="fixed";o.style.inset="0";o.style.background="rgba(0,0,0,.75)";o.style.display="flex";o.style.alignItems="center";o.style.justifyContent="center";o.style.zIndex="2147483647";var box=document.createElement("div");box.style.width="min(92vw, 700px)";box.style.height="min(70vh, 450px)";box.style.maxWidth="92vw";box.style.maxHeight="70vh";box.style.overflow="auto";box.style.background="#f3f4f6";box.style.color="#111";box.style.padding="20px";box.style.borderRadius="10px";box.style.boxShadow="0 16px 40px rgba(0,0,0,.45)";box.innerHTML=h;o.appendChild(box);o.addEventListener("click",function(e){if(e.target===o){o.remove();}});(document.body||document.documentElement).appendChild(o);})();';
+	}
+
+	if ($rawCustomJs === '') {
+		return '/* ad.js: custom js empty */';
+	}
+
+	return $rawCustomJs;
+}
+
 function get_active_triggers_for_pixel(?string $explicitTriggerId = null): array
 {
 	if ($explicitTriggerId === null || $explicitTriggerId === '') {
@@ -3102,6 +3439,51 @@ function fire_pixel_triggers(string $pixelKey, int $pixelId, int $hitId, array $
 					'name' => (string) $action['name'],
 				];
 				send_webhook_json((string) $action['webhook_url'], $payload);
+			} catch (Throwable $e) {
+			}
+		}
+	} catch (Throwable $e) {
+	}
+}
+
+function fire_trigger_action_by_id(?string $explicitTriggerId, array $context): void
+{
+	try {
+		$triggerId = normalize_trigger_id((string) $explicitTriggerId);
+		if ($triggerId === '') {
+			return;
+		}
+
+		$actions = get_active_triggers_for_pixel($triggerId);
+		if (!$actions) {
+			return;
+		}
+
+		$payloadContext = [
+			'event' => (string) ($context['event'] ?? 'ad_match'),
+			'ad_id' => (string) ($context['ad_id'] ?? ''),
+			'ad_rule_id' => (string) ($context['ad_rule_id'] ?? ''),
+			'trigger_id' => $triggerId,
+			'hit_at' => (string) ($context['hit_at'] ?? date('Y-m-d H:i:s')),
+			'ip_address' => (string) ($context['ip_address'] ?? ''),
+			'user_agent' => (string) ($context['user_agent'] ?? ''),
+			'referrer' => (string) ($context['referrer'] ?? ''),
+			'query_string' => (string) ($context['query_string'] ?? ''),
+			'country_code' => (string) ($context['country_code'] ?? ''),
+		];
+
+		foreach ($actions as $action) {
+			try {
+				$payload = render_trigger_payload_template((string) ($action['payload_template'] ?? ''), $payloadContext);
+				$payload['_trigger'] = [
+					'id' => (string) ($action['trigger_id'] ?? $triggerId),
+					'name' => (string) ($action['name'] ?? ''),
+				];
+				$payload['_ad_match'] = [
+					'ad_id' => (string) ($context['ad_id'] ?? ''),
+					'ad_rule_id' => (int) ($context['ad_rule_id'] ?? 0),
+				];
+				send_webhook_json((string) ($action['webhook_url'] ?? ''), $payload);
 			} catch (Throwable $e) {
 			}
 		}

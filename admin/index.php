@@ -279,6 +279,8 @@ render_header('Admin Dashboard');
 	<div class="inline">
 		<a class="nav-btn" href="stats.php">View detailed stats</a>
 		<a class="nav-btn" href="analytics.php">View analytics</a>
+		<a class="nav-btn" href="ads.php">Targeted ads</a>
+		<a class="nav-btn" href="ad-analytics.php">Ad analytics</a>
 		<a class="nav-btn" href="users.php">Manage users</a>
 		<a class="nav-btn" href="triggers.php">Manage triggers</a>
 		<a class="nav-btn" href="../migrate.php">Run migrations</a>
