@@ -48,8 +48,10 @@ $formatStoredLocalTime = static function (?string $value) use ($displayTimezone)
 
 $schemaReady = false;
 $schemaMissing = [];
+$hasAdRulesTable = false;
 try {
 	$pdo = db();
+	$hasAdRulesTable = table_exists($pdo, 'pd_ad_rules');
 	if (!table_exists($pdo, 'pd_ad_hit_logs')) {
 		$schemaMissing[] = 'table pd_ad_hit_logs';
 	} else {
@@ -90,12 +92,21 @@ $totalPages = 1;
 
 if ($schemaReady) {
 	try {
-		$adKeys = db()->query(
-			'SELECT DISTINCT ad_key
-			 FROM pd_ad_rules
-			 WHERE ad_key IS NOT NULL AND TRIM(ad_key) <> ""
-			 ORDER BY ad_key ASC'
-		)->fetchAll();
+		if ($hasAdRulesTable) {
+			$adKeys = db()->query(
+				'SELECT DISTINCT ad_key
+				 FROM pd_ad_rules
+				 WHERE ad_key IS NOT NULL AND TRIM(ad_key) <> ""
+				 ORDER BY ad_key ASC'
+			)->fetchAll();
+		} else {
+			$adKeys = db()->query(
+				'SELECT DISTINCT ad_key
+				 FROM pd_ad_hit_logs
+				 WHERE ad_key IS NOT NULL AND TRIM(ad_key) <> ""
+				 ORDER BY ad_key ASC'
+			)->fetchAll();
+		}
 	} catch (Throwable $e) {
 		$adKeys = [];
 	}
@@ -187,14 +198,14 @@ if ($schemaReady) {
 		$recentOrderBy = 'l.matched ASC, l.hit_at DESC, l.id DESC';
 	}
 
-	$recentStmt = db()->prepare(
-		"SELECT l.id, l.hit_at, l.ad_key, l.ip_address, l.traffic_type, l.country_code, l.isp_name, l.matched, l.matched_action_type, l.referrer, r.priority AS matched_priority
-		 FROM pd_ad_hit_logs l
-		 LEFT JOIN pd_ad_rules r ON r.id = l.matched_rule_id
-		 WHERE $whereRecentSql
-		 ORDER BY $recentOrderBy
-		 LIMIT :offset, :limit"
-	);
+	$recentSql =
+		"SELECT l.id, l.hit_at, l.ad_key, l.ip_address, l.traffic_type, l.country_code, l.isp_name, l.matched, l.matched_action_type, l.referrer, "
+		. ($hasAdRulesTable ? 'r.priority AS matched_priority' : 'NULL AS matched_priority')
+		. " FROM pd_ad_hit_logs l "
+		. ($hasAdRulesTable ? 'LEFT JOIN pd_ad_rules r ON r.id = l.matched_rule_id ' : '')
+		. "WHERE $whereRecentSql ORDER BY $recentOrderBy LIMIT :offset, :limit";
+
+	$recentStmt = db()->prepare($recentSql);
 	foreach ($params as $key => $value) {
 		$recentStmt->bindValue(':' . $key, $value, PDO::PARAM_STR);
 	}
