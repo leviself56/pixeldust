@@ -91,12 +91,8 @@ $totalPages = 1;
 if ($schemaReady) {
 	try {
 		$adKeys = db()->query(
-			'SELECT ad_key
-			 FROM (
-				SELECT ad_key FROM pd_ad_rules
-				UNION
-				SELECT ad_key FROM pd_ad_hit_logs
-			 ) keys_union
+			'SELECT DISTINCT ad_key
+			 FROM pd_ad_rules
 			 WHERE ad_key IS NOT NULL AND TRIM(ad_key) <> ""
 			 ORDER BY ad_key ASC'
 		)->fetchAll();

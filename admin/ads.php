@@ -272,8 +272,24 @@ if ($schemaReady && $_SERVER['REQUEST_METHOD'] === 'POST') {
 				throw new RuntimeException('Invalid rule selected.');
 			}
 
+			$adKeyLookupStmt = db()->prepare('SELECT ad_key FROM pd_ad_rules WHERE id = :id LIMIT 1');
+			$adKeyLookupStmt->execute(['id' => $ruleId]);
+			$ruleRow = $adKeyLookupStmt->fetch();
+			$deletedRuleAdKey = trim((string) ($ruleRow['ad_key'] ?? ''));
+
 			$deleteStmt = db()->prepare('DELETE FROM pd_ad_rules WHERE id = :id');
 			$deleteStmt->execute(['id' => $ruleId]);
+
+			if ($deletedRuleAdKey !== '') {
+				$remainingRuleCountStmt = db()->prepare('SELECT COUNT(*) AS total FROM pd_ad_rules WHERE ad_key = :ad_key');
+				$remainingRuleCountStmt->execute(['ad_key' => $deletedRuleAdKey]);
+				$remainingRuleCount = (int) (($remainingRuleCountStmt->fetch()['total'] ?? 0));
+				if ($remainingRuleCount === 0) {
+					$deleteHitsStmt = db()->prepare('DELETE FROM pd_ad_hit_logs WHERE ad_key = :ad_key');
+					$deleteHitsStmt->execute(['ad_key' => $deletedRuleAdKey]);
+				}
+			}
+
 			flash('success', 'Ad rule deleted.');
 			redirect('ads.php');
 		}
