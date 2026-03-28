@@ -101,19 +101,24 @@ if ($schemaReady) {
 	}
 
 	$where = ['hit_at >= :cutoff_utc'];
+	$whereRecent = ['l.hit_at >= :cutoff_utc'];
 	$params = ['cutoff_utc' => $cutoffUtc];
 
 	if ($adKeyFilter !== '') {
 		$where[] = 'ad_key = :ad_key';
+		$whereRecent[] = 'l.ad_key = :ad_key';
 		$params['ad_key'] = $adKeyFilter;
 	}
 	if ($matchFilter === 'matched') {
 		$where[] = 'matched = 1';
+		$whereRecent[] = 'l.matched = 1';
 	} elseif ($matchFilter === 'unmatched') {
 		$where[] = 'matched = 0';
+		$whereRecent[] = 'l.matched = 0';
 	}
 
 	$whereSql = implode(' AND ', $where);
+	$whereRecentSql = implode(' AND ', $whereRecent);
 
 	$summaryStmt = db()->prepare(
 		"SELECT
@@ -173,18 +178,21 @@ if ($schemaReady) {
 	$offset = ($page - 1) * $perPage;
 
 	$orderBy = 'hit_at DESC, id DESC';
+	$recentOrderBy = 'l.hit_at DESC, l.id DESC';
 	if ($sort === 'matched_first') {
 		$orderBy = 'matched DESC, hit_at DESC, id DESC';
+		$recentOrderBy = 'l.matched DESC, l.hit_at DESC, l.id DESC';
 	} elseif ($sort === 'unmatched_first') {
 		$orderBy = 'matched ASC, hit_at DESC, id DESC';
+		$recentOrderBy = 'l.matched ASC, l.hit_at DESC, l.id DESC';
 	}
 
 	$recentStmt = db()->prepare(
 		"SELECT l.id, l.hit_at, l.ad_key, l.ip_address, l.traffic_type, l.country_code, l.isp_name, l.matched, l.matched_action_type, l.referrer, r.priority AS matched_priority
 		 FROM pd_ad_hit_logs l
 		 LEFT JOIN pd_ad_rules r ON r.id = l.matched_rule_id
-		 WHERE $whereSql
-		 ORDER BY $orderBy
+		 WHERE $whereRecentSql
+		 ORDER BY $recentOrderBy
 		 LIMIT :offset, :limit"
 	);
 	foreach ($params as $key => $value) {
