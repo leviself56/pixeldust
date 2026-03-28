@@ -83,7 +83,6 @@ $summary = [
 	'unmatched_hits' => 0,
 	'unique_ips' => 0,
 ];
-$topReferrers = [];
 $topProviders = [];
 $topIps = [];
 $recentRows = [];
@@ -143,18 +142,6 @@ if ($schemaReady) {
 	);
 	$summaryStmt->execute($params);
 	$summary = array_merge($summary, (array) $summaryStmt->fetch());
-
-	$referrerExpr = "CASE WHEN referrer IS NULL OR TRIM(referrer) = '' THEN '-' ELSE LOWER(SUBSTRING_INDEX(SUBSTRING_INDEX(TRIM(referrer),'://',-1),'/',1)) END";
-	$topReferrersStmt = db()->prepare(
-		"SELECT $referrerExpr AS ref_domain, COUNT(*) AS hits
-		 FROM pd_ad_hit_logs
-		 WHERE $whereSql
-		 GROUP BY ref_domain
-		 ORDER BY hits DESC, ref_domain ASC
-		 LIMIT 12"
-	);
-	$topReferrersStmt->execute($params);
-	$topReferrers = $topReferrersStmt->fetchAll();
 
 	$topProvidersStmt = db()->prepare(
 		"SELECT COALESCE(NULLIF(TRIM(isp_name), ''), 'unknown') AS provider_name, COUNT(*) AS hits
@@ -251,9 +238,6 @@ render_header('Targeted Ad Analytics');
 	.summary-bubble{border:1px solid #dbe4f5;background:#f6f9ff;border-radius:999px;padding:12px 14px;line-height:1.2}
 	.summary-bubble strong{display:block;font-size:1.15rem;color:#1f4ea5}
 	.summary-bubble .muted{font-size:.82rem}
-	.ref-bubbles{display:flex;flex-wrap:wrap;gap:8px}
-	.ref-chip{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid #dbe4f5;background:#f8faff;border-radius:999px;font-size:.88rem}
-	.ref-chip .count{font-weight:700;color:#1f4ea5}
 </style>
 <div class="spaced card">
 	<div>
@@ -334,34 +318,22 @@ render_header('Targeted Ad Analytics');
 		<div class="summary-bubble"><strong><?php echo number_format((int) ($summary['unique_ips'] ?? 0)); ?></strong><span class="muted">Unique IPs</span></div>
 		<div class="summary-bubble"><strong><?php echo number_format($matchRate, 2); ?>%</strong><span class="muted">Match rate</span></div>
 	</div>
-	<h3 style="margin:6px 0 10px;">Top Referrers</h3>
-	<?php if (!$topReferrers): ?>
-		<p class="muted">No referrer data in selected filters.</p>
-	<?php else: ?>
-		<div class="ref-bubbles">
-			<?php foreach ($topReferrers as $row): ?>
-				<?php $refDomain = trim((string) ($row['ref_domain'] ?? '-')); ?>
-				<span class="ref-chip"><span><?php echo e($refDomain !== '' ? $refDomain : '-'); ?></span><span class="count"><?php echo number_format((int) ($row['hits'] ?? 0)); ?></span></span>
-			<?php endforeach; ?>
-		</div>
-	<?php endif; ?>
 </div>
 
 <div class="row" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;">
 	<div class="card">
 		<h2>Top Providers</h2>
 		<table>
-			<thead><tr><th>Provider</th><th>Hits</th><th>Drilldown</th></tr></thead>
+			<thead><tr><th>Provider</th><th>Hits</th></tr></thead>
 			<tbody>
 			<?php if (!$topProviders): ?>
-				<tr><td colspan="3" class="muted">No provider data.</td></tr>
+				<tr><td colspan="2" class="muted">No provider data.</td></tr>
 			<?php else: ?>
 				<?php foreach ($topProviders as $row): ?>
 					<?php $providerName = (string) ($row['provider_name'] ?? 'unknown'); ?>
 					<tr>
-						<td><?php echo e($providerName); ?></td>
+						<td><a href="ad-linkout.php?type=provider&amp;value=<?php echo urlencode($providerName); ?>&amp;period=<?php echo urlencode($period); ?>"><?php echo e($providerName); ?></a></td>
 						<td><?php echo number_format((int) ($row['hits'] ?? 0)); ?></td>
-						<td><a class="nav-btn" href="ad-linkout.php?type=provider&amp;value=<?php echo urlencode($providerName); ?>&amp;period=<?php echo urlencode($period); ?>">Open analytics</a></td>
 					</tr>
 				<?php endforeach; ?>
 			<?php endif; ?>
@@ -371,19 +343,20 @@ render_header('Targeted Ad Analytics');
 	<div class="card">
 		<h2>Top IPs</h2>
 		<table>
-			<thead><tr><th>IP Address</th><th>Hits</th><th>Matched</th><th>Drilldown</th></tr></thead>
+			<thead><tr><th>IP Address</th><th>Hits</th><th>Matched</th></tr></thead>
 			<tbody>
 			<?php if (!$topIps): ?>
-				<tr><td colspan="4" class="muted">No IP data.</td></tr>
+				<tr><td colspan="3" class="muted">No IP data.</td></tr>
 			<?php else: ?>
 				<?php foreach ($topIps as $row): ?>
 					<?php $ipValue = (string) ($row['ip_address'] ?? ''); ?>
 					<?php $ipDisplay = format_ip_with_operator_tag($ipValue, (string) ($ipTagMap[$ipValue] ?? '')); ?>
+					<?php $ipLinkQuery = ['type' => 'ip', 'value' => $ipValue, 'period' => $period]; ?>
+					<?php if ($adKeyFilter !== '') { $ipLinkQuery['ad_key'] = $adKeyFilter; } ?>
 					<tr>
-						<td><a href="ad-linkout.php?type=ip&amp;value=<?php echo urlencode($ipValue); ?>&amp;period=<?php echo urlencode($period); ?>"><?php echo e($ipDisplay !== '' ? $ipDisplay : $ipValue); ?></a></td>
+						<td><a href="ad-linkout.php?<?php echo e(http_build_query($ipLinkQuery)); ?>"><?php echo e($ipDisplay !== '' ? $ipDisplay : $ipValue); ?></a></td>
 						<td><?php echo number_format((int) ($row['hits'] ?? 0)); ?></td>
 						<td><?php echo number_format((int) ($row['matched_hits'] ?? 0)); ?></td>
-						<td><a class="nav-btn" href="ad-linkout.php?type=ip&amp;value=<?php echo urlencode($ipValue); ?>&amp;period=<?php echo urlencode($period); ?>">Open IP details</a></td>
 					</tr>
 				<?php endforeach; ?>
 			<?php endif; ?>
@@ -407,19 +380,21 @@ render_header('Targeted Ad Analytics');
 			<th>Provider</th>
 			<th>Traffic</th>
 			<th>Country</th>
-			<th>Referrer</th>
 		</tr>
 		</thead>
 		<tbody>
 		<?php if (!$recentRows): ?>
-			<tr><td colspan="10" class="muted">No tracked events in selected filters.</td></tr>
+			<tr><td colspan="9" class="muted">No tracked events in selected filters.</td></tr>
 		<?php else: ?>
 			<?php foreach ($recentRows as $row): ?>
 				<?php
 				$ipValue = (string) ($row['ip_address'] ?? '');
 				$ipDisplay = format_ip_with_operator_tag($ipValue, (string) ($ipTagMap[$ipValue] ?? ''));
-				$referrerValue = trim((string) ($row['referrer'] ?? ''));
-				$referrerLabel = normalize_referrer_domain($referrerValue !== '' ? $referrerValue : null);
+				$recentRowAdKey = sanitize_ad_key((string) ($row['ad_key'] ?? ''));
+				$recentIpLinkQuery = ['type' => 'ip', 'value' => $ipValue, 'period' => $period];
+				if ($recentRowAdKey !== '') {
+					$recentIpLinkQuery['ad_key'] = $recentRowAdKey;
+				}
 				$priorityLabel = (int) ($row['matched'] ?? 0) === 1 && isset($row['matched_priority']) && $row['matched_priority'] !== null
 					? (string) ((int) $row['matched_priority'])
 					: '-';
@@ -430,17 +405,10 @@ render_header('Targeted Ad Analytics');
 					<td><?php echo (int) ($row['matched'] ?? 0) === 1 ? 'Matched' : 'Unmatched'; ?></td>
 					<td><?php echo e($priorityLabel); ?></td>
 					<td><?php echo e((string) ($row['matched_action_type'] ?? '-')); ?></td>
-					<td><a href="ad-linkout.php?type=ip&amp;value=<?php echo urlencode($ipValue); ?>&amp;period=<?php echo urlencode($period); ?>"><?php echo e($ipDisplay !== '' ? $ipDisplay : $ipValue); ?></a></td>
+					<td><a href="ad-linkout.php?<?php echo e(http_build_query($recentIpLinkQuery)); ?>"><?php echo e($ipDisplay !== '' ? $ipDisplay : $ipValue); ?></a></td>
 					<td><?php echo e((string) (($row['isp_name'] ?? '') !== '' ? $row['isp_name'] : 'unknown')); ?></td>
 					<td><?php echo e((string) ($row['traffic_type'] ?? 'unknown')); ?></td>
 					<td><?php echo e((string) (($row['country_code'] ?? '') !== '' ? $row['country_code'] : '-')); ?></td>
-					<td>
-						<?php if ($referrerValue !== '' && filter_var($referrerValue, FILTER_VALIDATE_URL)): ?>
-							<a href="<?php echo e($referrerValue); ?>" target="_blank" rel="noopener noreferrer"><?php echo e($referrerLabel); ?></a>
-						<?php else: ?>
-							<?php echo e($referrerLabel); ?>
-						<?php endif; ?>
-					</td>
 				</tr>
 			<?php endforeach; ?>
 		<?php endif; ?>

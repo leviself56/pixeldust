@@ -31,21 +31,14 @@ if ($token !== '' && !current_admin()) {
 require_admin();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') === 'save_ip_tag') {
-	$postSourceType = trim((string) ($_POST['source_type'] ?? 'pixel'));
-	if (!in_array($postSourceType, ['pixel', 'redirect', 'ad'], true)) {
-		$postSourceType = 'pixel';
-	}
-
-	$postPixelKey = trim((string) ($_POST['pixel_key'] ?? ''));
-	$postRedirectKey = trim((string) ($_POST['redirect_key'] ?? ''));
-	$postAdKey = trim((string) ($_POST['ad_key'] ?? ''));
-	$postSourceKey = $postSourceType === 'redirect' ? $postRedirectKey : ($postSourceType === 'ad' ? $postAdKey : $postPixelKey);
+	$postSourceType = 'all';
 	$postIpAddress = trim((string) ($_POST['ip'] ?? ''));
 	if (strlen($postIpAddress) > 45) {
 		$postIpAddress = substr($postIpAddress, 0, 45);
 	}
 
 	$postPeriod = (string) ($_POST['period'] ?? '7d');
+	$postRecentPage = max(1, (int) ($_POST['recent_page'] ?? 1));
 	$postValidPeriods = ['24h', '7d', '30d', 'all'];
 	if (!in_array($postPeriod, $postValidPeriods, true)) {
 		$postPeriod = '7d';
@@ -60,14 +53,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
 		'source_type' => $postSourceType,
 		'period' => $postPeriod,
 		'ip' => $postIpAddress,
+		'recent_page' => $postRecentPage,
 	];
-	if ($postSourceType === 'redirect') {
-		$redirectParams['redirect_key'] = $postSourceKey;
-	} elseif ($postSourceType === 'ad') {
-		$redirectParams['ad_key'] = $postSourceKey;
-	} else {
-		$redirectParams['pixel_key'] = $postSourceKey;
-	}
 
 	if ($postIpAddress === '' || filter_var($postIpAddress, FILTER_VALIDATE_IP) === false) {
 		$redirectParams['tag_status'] = 'invalid_ip';
@@ -103,18 +90,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
 	redirect('ip-details.php?' . http_build_query($redirectParams));
 }
 
-$sourceType = trim((string) ($_GET['source_type'] ?? 'pixel'));
-if (!in_array($sourceType, ['pixel', 'redirect', 'ad'], true)) {
-	$sourceType = 'pixel';
-}
+$sourceType = 'all';
 
 $pixelKey = trim((string) ($_GET['pixel_key'] ?? ''));
 $redirectKey = trim((string) ($_GET['redirect_key'] ?? ''));
 $adKey = trim((string) ($_GET['ad_key'] ?? ''));
-$sourceKey = $sourceType === 'redirect' ? $redirectKey : ($sourceType === 'ad' ? $adKey : $pixelKey);
+$sourceKey = $sourceType === 'redirect' ? $redirectKey : ($sourceType === 'ad' ? $adKey : ($sourceType === 'pixel' ? $pixelKey : ''));
 $ipAddress = trim((string) ($_GET['ip'] ?? ''));
 $period = (string) ($_GET['period'] ?? '7d');
 $tagStatus = trim((string) ($_GET['tag_status'] ?? ''));
+$recentPage = max(1, (int) ($_GET['recent_page'] ?? 1));
+$recentPerPage = 100;
+$recentTotalRows = 0;
+$recentTotalPages = 1;
+$recentDisplayStart = 0;
+$recentDisplayEnd = 0;
 $validPeriods = ['24h', '7d', '30d', 'all'];
 if (!in_array($period, $validPeriods, true)) {
 	$period = '7d';
@@ -133,28 +123,26 @@ if ($period === 'all') {
 		->format('Y-m-d H:i:s');
 }
 
+$hasPixelTables = false;
 $hasRedirectTables = false;
 $hasAdTables = false;
 try {
 	$pdo = db();
+	$hasPixelTables = table_exists($pdo, 'pd_pixels') && table_exists($pdo, 'pd_pixel_hits');
 	$hasRedirectTables = table_exists($pdo, 'pd_redirect_links') && table_exists($pdo, 'pd_redirect_hits');
 	$hasAdTables = table_exists($pdo, 'pd_ad_hit_logs');
 } catch (Throwable $e) {
+	$hasPixelTables = false;
 	$hasRedirectTables = false;
 	$hasAdTables = false;
 }
 
-if ($sourceType === 'redirect' && !$hasRedirectTables) {
-	$sourceType = 'pixel';
-	$sourceKey = $pixelKey;
-}
+$sourceKey = '';
 
-if ($sourceType === 'ad' && !$hasAdTables) {
-	$sourceType = 'pixel';
-	$sourceKey = $pixelKey;
+$pixels = [];
+if ($hasPixelTables) {
+	$pixels = db()->query('SELECT pixel_key, total_hits FROM pd_pixels ORDER BY pixel_key ASC')->fetchAll();
 }
-
-$pixels = db()->query('SELECT pixel_key, total_hits FROM pd_pixels ORDER BY pixel_key ASC')->fetchAll();
 $redirects = [];
 if ($hasRedirectTables) {
 	$redirects = db()->query('SELECT redirect_key, total_hits FROM pd_redirect_links ORDER BY redirect_key ASC')->fetchAll();
@@ -170,27 +158,12 @@ if ($hasAdTables) {
 }
 
 $selectedSource = null;
-if ($sourceKey !== '') {
-	if ($sourceType === 'redirect') {
-		$stmt = db()->prepare('SELECT id, redirect_key AS source_key, total_hits FROM pd_redirect_links WHERE redirect_key = :source_key LIMIT 1');
-		$stmt->execute(['source_key' => $sourceKey]);
-		$selectedSource = $stmt->fetch();
-	} elseif ($sourceType === 'ad') {
-		$stmt = db()->prepare(
-			'SELECT ad_key AS source_key, COUNT(*) AS total_hits
-			 FROM pd_ad_hit_logs
-			 WHERE ad_key = :source_key
-			 GROUP BY ad_key
-			 LIMIT 1'
-		);
-		$stmt->execute(['source_key' => $sourceKey]);
-		$selectedSource = $stmt->fetch();
-	} else {
-		$stmt = db()->prepare('SELECT id, pixel_key AS source_key, total_hits FROM pd_pixels WHERE pixel_key = :source_key LIMIT 1');
-		$stmt->execute(['source_key' => $sourceKey]);
-		$selectedSource = $stmt->fetch();
-	}
-}
+$selectedSource = [
+	'source_key' => 'All Sources',
+	'id' => 0,
+];
+$isAllSourcesView = $sourceType === 'all';
+$canLoadIpDetails = $ipAddress !== '';
 
 $tableStatus = analytics_table_status();
 $summary = [
@@ -218,68 +191,7 @@ if ($ipAddress !== '' && filter_var($ipAddress, FILTER_VALIDATE_IP) !== false) {
 	$ipDisplayLabel = format_ip_with_operator_tag($ipAddress, $ipOperatorTag);
 }
 
-if ($selectedSource && $ipAddress !== '') {
-	$hitTable = $sourceType === 'redirect' ? 'pd_redirect_hits' : ($sourceType === 'ad' ? 'pd_ad_hit_logs' : 'pd_pixel_hits');
-	$idColumn = $sourceType === 'redirect' ? 'redirect_id' : ($sourceType === 'ad' ? null : 'pixel_id');
-	$keyColumn = $sourceType === 'redirect' ? 'redirect_key' : ($sourceType === 'ad' ? 'ad_key' : 'pixel_key');
-	$classTable = $sourceType === 'redirect' ? 'pd_redirect_hit_classification' : 'pd_hit_classification';
-	$classAvailable = $sourceType === 'redirect' ? (bool) ($tableStatus['redirect_hit_classification'] ?? false) : ($sourceType === 'ad' ? false : (bool) ($tableStatus['hit_classification'] ?? false));
-	$sourceFilterSql = $sourceType === 'ad' ? "h.$keyColumn = :source_key" : "h.$idColumn = :source_id";
-	$sourceParams = $sourceType === 'ad'
-		? ['source_key' => (string) $selectedSource['source_key']]
-		: ['source_id' => (int) $selectedSource['id']];
-
-	if ($classAvailable && $sourceType !== 'ad') {
-		$backfillSql =
-			"SELECT h.id, h.$idColumn AS source_id, h.$keyColumn AS source_key, h.ip_address, h.user_agent, h.referrer, h.request_uri, h.accept_language, h.remote_host
-			 FROM $hitTable h
-			 LEFT JOIN $classTable c ON c.hit_id = h.id
-			 WHERE $sourceFilterSql AND h.ip_address = :ip_address AND c.hit_id IS NULL
-			 ORDER BY h.id DESC
-			 LIMIT 120";
-		$backfillStmt = db()->prepare($backfillSql);
-		$backfillStmt->execute(array_merge($sourceParams, [
-			'ip_address' => $ipAddress,
-		]));
-		$backfillRows = $backfillStmt->fetchAll();
-		foreach ($backfillRows as $row) {
-			try {
-				if ($sourceType === 'redirect') {
-					classify_and_store_redirect_hit(
-						(int) $row['id'],
-						(int) $row['source_id'],
-						(string) $row['source_key'],
-						[
-							'ip_address' => (string) ($row['ip_address'] ?? ''),
-							'user_agent' => (string) ($row['user_agent'] ?? ''),
-							'referrer' => (string) ($row['referrer'] ?? ''),
-							'request_uri' => (string) ($row['request_uri'] ?? ''),
-							'accept_language' => (string) ($row['accept_language'] ?? ''),
-							'remote_host' => (string) ($row['remote_host'] ?? ''),
-						],
-						true
-					);
-				} else {
-					classify_and_store_hit(
-						(int) $row['id'],
-						(int) $row['source_id'],
-						(string) $row['source_key'],
-						[
-							'ip_address' => (string) ($row['ip_address'] ?? ''),
-							'user_agent' => (string) ($row['user_agent'] ?? ''),
-							'referrer' => (string) ($row['referrer'] ?? ''),
-							'request_uri' => (string) ($row['request_uri'] ?? ''),
-							'accept_language' => (string) ($row['accept_language'] ?? ''),
-							'remote_host' => (string) ($row['remote_host'] ?? ''),
-						],
-						true
-					);
-				}
-			} catch (Throwable $e) {
-			}
-		}
-	}
-
+if ($canLoadIpDetails) {
 	if ($tableStatus['ip_enrichment']) {
 		try {
 			$geo = ensure_ip_enrichment($ipAddress, true);
@@ -294,148 +206,378 @@ if ($selectedSource && $ipAddress !== '') {
 
 	$referrerDomainExpr = "CASE WHEN h.referrer IS NULL OR TRIM(h.referrer)='' THEN '-' ELSE LOWER(SUBSTRING_INDEX(SUBSTRING_INDEX(TRIM(h.referrer),'://',-1),'/',1)) END";
 	$emailCaseExpr = "CASE WHEN h.user_agent LIKE '%GoogleImageProxy%' OR h.remote_host LIKE 'google-proxy-%' OR h.referrer LIKE '%mobile-webview.gmail.com%' OR h.referrer LIKE '%mail.google.com%' THEN 'gmail' WHEN h.user_agent LIKE 'YahooMailProxy%' OR h.remote_host LIKE 'ec%.ycpi.%yahoo.com' THEN 'yahoo_mail' WHEN h.referrer LIKE '%outlook.live.com%' OR h.user_agent LIKE '%OneOutlook/%' OR h.user_agent LIKE '%ms-office%' THEN 'outlook_family' WHEN h.referrer LIKE '%webmail.%' OR h.referrer LIKE '%mail.%' OR h.referrer LIKE '%neo.space%' OR h.referrer LIKE '%titan.email%' THEN 'other_webmail' ELSE 'unknown' END";
-	$clientExpr = $classAvailable ? "COALESCE(NULLIF(c.email_client_guess,''), $emailCaseExpr)" : $emailCaseExpr;
-	$trafficExpr = $classAvailable ? "COALESCE(NULLIF(c.traffic_type,''), 'unknown')" : "CASE WHEN $clientExpr IN ('gmail','yahoo_mail') THEN 'proxy' ELSE 'unknown' END";
-	$ispExpr = $classAvailable
-		? "COALESCE(NULLIF(c.isp_guess,''), 'unknown')"
-		: "CASE WHEN h.remote_host IS NULL OR TRIM(h.remote_host)='' THEN 'unknown' WHEN h.remote_host REGEXP '^[0-9]+(\\\\.[0-9]+){3}$' THEN 'ip_unresolved' ELSE LOWER(SUBSTRING_INDEX(TRIM(h.remote_host),'.',-2)) END";
+	$clientExpr = $emailCaseExpr;
+	$trafficExpr = "CASE WHEN $clientExpr IN ('gmail','yahoo_mail') THEN 'proxy' ELSE 'unknown' END";
+	$ispExpr = "CASE WHEN h.remote_host IS NULL OR TRIM(h.remote_host)='' THEN 'unknown' WHEN h.remote_host REGEXP '^[0-9]+(\\\\.[0-9]+){3}$' THEN 'ip_unresolved' ELSE LOWER(SUBSTRING_INDEX(TRIM(h.remote_host),'.',-2)) END";
 
-	$summarySql =
-		"SELECT
-			COUNT(*) AS hits,
-			MIN(h.hit_at) AS first_seen,
-			MAX(h.hit_at) AS last_seen,
-			COUNT(DISTINCT DATE(h.hit_at)) AS active_days,
-			COUNT(DISTINCT $referrerDomainExpr) AS unique_ref_domains,
-			COUNT(DISTINCT COALESCE(NULLIF(TRIM(h.user_agent),''),'-')) AS unique_user_agents
-		 FROM $hitTable h
-		 " . ($classAvailable ? "LEFT JOIN $classTable c ON c.hit_id = h.id" : '') . "
-		 WHERE $sourceFilterSql AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc";
-	$summaryStmt = db()->prepare($summarySql);
-	$summaryStmt->execute(array_merge($sourceParams, [
-		'ip_address' => $ipAddress,
-		'cutoff_utc' => $cutoffUtc,
-	]));
-	$summary = array_merge($summary, (array) $summaryStmt->fetch());
+	if ($sourceType === 'all') {
+		$unionParts = [];
+		if ($hasPixelTables) {
+			$unionParts[] = "SELECT 'pixel' AS source_type, pixel_key AS source_key, hit_at, ip_address, user_agent, referrer, remote_host, accept_language FROM pd_pixel_hits";
+		}
+		if ($hasRedirectTables) {
+			$unionParts[] = "SELECT 'redirect' AS source_type, redirect_key AS source_key, hit_at, ip_address, user_agent, referrer, remote_host, accept_language FROM pd_redirect_hits";
+		}
+		if ($hasAdTables) {
+			$unionParts[] = "SELECT 'ad' AS source_type, ad_key AS source_key, hit_at, ip_address, user_agent, referrer, remote_host, accept_language FROM pd_ad_hit_logs";
+		}
 
-	$balancedVisitsSql =
-		"WITH ordered_hits AS (
-			SELECT
-				h.hit_at,
-				LAG(h.hit_at) OVER (
-					PARTITION BY CONCAT(COALESCE(h.ip_address, ''), '|', MD5(CONCAT(COALESCE(h.user_agent, ''), '|', COALESCE(h.accept_language, ''))))
-					ORDER BY h.hit_at
-				) AS prev_hit
-			FROM $hitTable h
-			WHERE $sourceFilterSql AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
-		)
-		SELECT COALESCE(SUM(CASE WHEN prev_hit IS NULL OR TIMESTAMPDIFF(MINUTE, prev_hit, hit_at) > 30 THEN 1 ELSE 0 END), 0) AS estimated_visits_balanced
-		FROM ordered_hits";
-	$balancedVisitsStmt = db()->prepare($balancedVisitsSql);
-	$balancedVisitsStmt->execute(array_merge($sourceParams, [
-		'ip_address' => $ipAddress,
-		'cutoff_utc' => $cutoffUtc,
-	]));
-	$balancedVisitsRow = (array) $balancedVisitsStmt->fetch();
-	$summary['estimated_visits_balanced'] = (int) ($balancedVisitsRow['estimated_visits_balanced'] ?? 0);
+		if ($unionParts) {
+			$allSourceSql = implode(' UNION ALL ', $unionParts);
+			$recentTotalStmt = db()->prepare(
+				"SELECT COUNT(*) AS total
+				 FROM ($allSourceSql) h
+				 WHERE h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc"
+			);
+			$recentTotalStmt->execute([
+				'ip_address' => $ipAddress,
+				'cutoff_utc' => $cutoffUtc,
+			]);
+			$recentTotalRows = (int) (($recentTotalStmt->fetch()['total'] ?? 0));
+			$recentTotalPages = max(1, (int) ceil($recentTotalRows / $recentPerPage));
+			if ($recentPage > $recentTotalPages) {
+				$recentPage = $recentTotalPages;
+			}
+			$recentOffset = ($recentPage - 1) * $recentPerPage;
 
-	$timelineSql =
-		"SELECT DATE(h.hit_at) AS bucket, COUNT(*) AS hits
-		 FROM $hitTable h
-		 WHERE $sourceFilterSql AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
-		 GROUP BY bucket
-		 ORDER BY bucket ASC";
-	$timelineStmt = db()->prepare($timelineSql);
-	$timelineStmt->execute(array_merge($sourceParams, [
-		'ip_address' => $ipAddress,
-		'cutoff_utc' => $cutoffUtc,
-	]));
-	$timelineRows = $timelineStmt->fetchAll();
+			$summaryStmt = db()->prepare(
+				"SELECT
+					COUNT(*) AS hits,
+					MIN(h.hit_at) AS first_seen,
+					MAX(h.hit_at) AS last_seen,
+					COUNT(DISTINCT DATE(h.hit_at)) AS active_days,
+					COUNT(DISTINCT $referrerDomainExpr) AS unique_ref_domains,
+					COUNT(DISTINCT COALESCE(NULLIF(TRIM(h.user_agent),''),'-')) AS unique_user_agents
+				 FROM ($allSourceSql) h
+				 WHERE h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc"
+			);
+			$summaryStmt->execute([
+				'ip_address' => $ipAddress,
+				'cutoff_utc' => $cutoffUtc,
+			]);
+			$summary = array_merge($summary, (array) $summaryStmt->fetch());
 
-	$refSql =
-		"SELECT $referrerDomainExpr AS ref_domain, COUNT(*) AS hits
-		 FROM $hitTable h
-		 WHERE $sourceFilterSql AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
-		 GROUP BY ref_domain
-		 ORDER BY hits DESC
-		 LIMIT 10";
-	$refStmt = db()->prepare($refSql);
-	$refStmt->execute(array_merge($sourceParams, [
-		'ip_address' => $ipAddress,
-		'cutoff_utc' => $cutoffUtc,
-	]));
-	$referrerRows = $refStmt->fetchAll();
+			$balancedVisitsStmt = db()->prepare(
+				"WITH ordered_hits AS (
+					SELECT
+						h.hit_at,
+						LAG(h.hit_at) OVER (
+							PARTITION BY CONCAT(COALESCE(h.ip_address, ''), '|', MD5(CONCAT(COALESCE(h.user_agent, ''), '|', COALESCE(h.accept_language, ''))))
+							ORDER BY h.hit_at
+						) AS prev_hit
+					FROM ($allSourceSql) h
+					WHERE h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+				)
+				SELECT COALESCE(SUM(CASE WHEN prev_hit IS NULL OR TIMESTAMPDIFF(MINUTE, prev_hit, hit_at) > 30 THEN 1 ELSE 0 END), 0) AS estimated_visits_balanced
+				FROM ordered_hits"
+			);
+			$balancedVisitsStmt->execute([
+				'ip_address' => $ipAddress,
+				'cutoff_utc' => $cutoffUtc,
+			]);
+			$balancedVisitsRow = (array) $balancedVisitsStmt->fetch();
+			$summary['estimated_visits_balanced'] = (int) ($balancedVisitsRow['estimated_visits_balanced'] ?? 0);
 
-	$uaSql =
-		"SELECT COALESCE(NULLIF(TRIM(h.user_agent),''),'-') AS user_agent, COUNT(*) AS hits
-		 FROM $hitTable h
-		 WHERE $sourceFilterSql AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
-		 GROUP BY user_agent
-		 ORDER BY hits DESC
-		 LIMIT 10";
-	$uaStmt = db()->prepare($uaSql);
-	$uaStmt->execute(array_merge($sourceParams, [
-		'ip_address' => $ipAddress,
-		'cutoff_utc' => $cutoffUtc,
-	]));
-	$userAgentRows = $uaStmt->fetchAll();
+			$timelineStmt = db()->prepare(
+				"SELECT DATE(h.hit_at) AS bucket, COUNT(*) AS hits
+				 FROM ($allSourceSql) h
+				 WHERE h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+				 GROUP BY bucket
+				 ORDER BY bucket ASC"
+			);
+			$timelineStmt->execute([
+				'ip_address' => $ipAddress,
+				'cutoff_utc' => $cutoffUtc,
+			]);
+			$timelineRows = $timelineStmt->fetchAll();
 
-	$clientSql =
-		"SELECT $clientExpr AS client_name, $trafficExpr AS traffic_type, $ispExpr AS isp_name, COUNT(*) AS hits
-		 FROM $hitTable h
-		 " . ($classAvailable ? "LEFT JOIN $classTable c ON c.hit_id = h.id" : '') . "
-		 WHERE $sourceFilterSql AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
-		 GROUP BY client_name, traffic_type, isp_name
-		 ORDER BY hits DESC";
-	$clientStmt = db()->prepare($clientSql);
-	$clientStmt->execute(array_merge($sourceParams, [
-		'ip_address' => $ipAddress,
-		'cutoff_utc' => $cutoffUtc,
-	]));
-	$clientRows = $clientStmt->fetchAll();
+			$refStmt = db()->prepare(
+				"SELECT $referrerDomainExpr AS ref_domain, COUNT(*) AS hits
+				 FROM ($allSourceSql) h
+				 WHERE h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+				 GROUP BY ref_domain
+				 ORDER BY hits DESC
+				 LIMIT 10"
+			);
+			$refStmt->execute([
+				'ip_address' => $ipAddress,
+				'cutoff_utc' => $cutoffUtc,
+			]);
+			$referrerRows = $refStmt->fetchAll();
 
-	$crossSql =
-		"SELECT $keyColumn AS source_key, COUNT(*) AS hits, MIN(hit_at) AS first_seen, MAX(hit_at) AS last_seen
-		 FROM $hitTable
-		 WHERE ip_address = :ip_address
-		 GROUP BY $keyColumn
-		 ORDER BY hits DESC
-		 LIMIT 15";
-	$crossStmt = db()->prepare($crossSql);
-	$crossStmt->execute(['ip_address' => $ipAddress]);
-	$crossSourceRows = $crossStmt->fetchAll();
+			$uaStmt = db()->prepare(
+				"SELECT COALESCE(NULLIF(TRIM(h.user_agent),''),'-') AS user_agent, COUNT(*) AS hits
+				 FROM ($allSourceSql) h
+				 WHERE h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+				 GROUP BY user_agent
+				 ORDER BY hits DESC
+				 LIMIT 10"
+			);
+			$uaStmt->execute([
+				'ip_address' => $ipAddress,
+				'cutoff_utc' => $cutoffUtc,
+			]);
+			$userAgentRows = $uaStmt->fetchAll();
 
-	$recentSql =
-		"SELECT hit_at, referrer, user_agent, remote_host
-		 FROM $hitTable
-		 WHERE " . ($sourceType === 'ad' ? "$keyColumn = :source_key" : "$idColumn = :source_id") . " AND ip_address = :ip_address AND hit_at >= :cutoff_utc
-		 ORDER BY hit_at DESC
-		 LIMIT 100";
-	$recentStmt = db()->prepare($recentSql);
-	$recentStmt->execute(array_merge($sourceParams, [
-		'ip_address' => $ipAddress,
-		'cutoff_utc' => $cutoffUtc,
-	]));
-	$recentRows = $recentStmt->fetchAll();
+			$clientStmt = db()->prepare(
+				"SELECT $clientExpr AS client_name, $trafficExpr AS traffic_type, $ispExpr AS isp_name, COUNT(*) AS hits
+				 FROM ($allSourceSql) h
+				 WHERE h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+				 GROUP BY client_name, traffic_type, isp_name
+				 ORDER BY hits DESC"
+			);
+			$clientStmt->execute([
+				'ip_address' => $ipAddress,
+				'cutoff_utc' => $cutoffUtc,
+			]);
+			$clientRows = $clientStmt->fetchAll();
+
+			$crossStmt = db()->prepare(
+				"SELECT h.source_type, h.source_key, COUNT(*) AS hits, MIN(h.hit_at) AS first_seen, MAX(h.hit_at) AS last_seen
+				 FROM ($allSourceSql) h
+				 WHERE h.ip_address = :ip_address
+				 GROUP BY h.source_type, h.source_key
+				 ORDER BY hits DESC, h.source_type ASC, h.source_key ASC
+				 LIMIT 30"
+			);
+			$crossStmt->execute(['ip_address' => $ipAddress]);
+			$crossSourceRows = $crossStmt->fetchAll();
+
+			$recentStmt = db()->prepare(
+				"SELECT h.source_type, h.source_key, h.hit_at, h.referrer, h.user_agent, h.remote_host
+				 FROM ($allSourceSql) h
+				 WHERE h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+				 ORDER BY h.hit_at DESC
+				 LIMIT :offset, :limit"
+			);
+			$recentStmt->bindValue(':ip_address', $ipAddress, PDO::PARAM_STR);
+			$recentStmt->bindValue(':cutoff_utc', $cutoffUtc, PDO::PARAM_STR);
+			$recentStmt->bindValue(':offset', $recentOffset, PDO::PARAM_INT);
+			$recentStmt->bindValue(':limit', $recentPerPage, PDO::PARAM_INT);
+			$recentStmt->execute();
+			$recentRows = $recentStmt->fetchAll();
+		}
+	} else {
+		$hitTable = $sourceType === 'redirect' ? 'pd_redirect_hits' : ($sourceType === 'ad' ? 'pd_ad_hit_logs' : 'pd_pixel_hits');
+		$idColumn = $sourceType === 'redirect' ? 'redirect_id' : ($sourceType === 'ad' ? null : 'pixel_id');
+		$keyColumn = $sourceType === 'redirect' ? 'redirect_key' : ($sourceType === 'ad' ? 'ad_key' : 'pixel_key');
+		$classTable = $sourceType === 'redirect' ? 'pd_redirect_hit_classification' : 'pd_hit_classification';
+		$classAvailable = $sourceType === 'redirect'
+			? (bool) ($tableStatus['redirect_hit_classification'] ?? false)
+			: ($sourceType === 'pixel' ? (bool) ($tableStatus['hit_classification'] ?? false) : false);
+		$sourceFilterSql = $sourceType === 'ad' ? "h.$keyColumn = :source_key" : "h.$idColumn = :source_id";
+		$sourceParams = $sourceType === 'ad'
+			? ['source_key' => (string) $selectedSource['source_key']]
+			: ['source_id' => (int) $selectedSource['id']];
+
+		if ($classAvailable) {
+			$backfillSql =
+				"SELECT h.id, h.$idColumn AS source_id, h.$keyColumn AS source_key, h.ip_address, h.user_agent, h.referrer, h.request_uri, h.accept_language, h.remote_host
+				 FROM $hitTable h
+				 LEFT JOIN $classTable c ON c.hit_id = h.id
+				 WHERE $sourceFilterSql AND h.ip_address = :ip_address AND c.hit_id IS NULL
+				 ORDER BY h.id DESC
+				 LIMIT 120";
+			$backfillStmt = db()->prepare($backfillSql);
+			$backfillStmt->execute(array_merge($sourceParams, [
+				'ip_address' => $ipAddress,
+			]));
+			$backfillRows = $backfillStmt->fetchAll();
+			foreach ($backfillRows as $row) {
+				try {
+					if ($sourceType === 'redirect') {
+						classify_and_store_redirect_hit(
+							(int) $row['id'],
+							(int) $row['source_id'],
+							(string) $row['source_key'],
+							[
+								'ip_address' => (string) ($row['ip_address'] ?? ''),
+								'user_agent' => (string) ($row['user_agent'] ?? ''),
+								'referrer' => (string) ($row['referrer'] ?? ''),
+								'request_uri' => (string) ($row['request_uri'] ?? ''),
+								'accept_language' => (string) ($row['accept_language'] ?? ''),
+								'remote_host' => (string) ($row['remote_host'] ?? ''),
+							],
+							true
+						);
+					} else {
+						classify_and_store_hit(
+							(int) $row['id'],
+							(int) $row['source_id'],
+							(string) $row['source_key'],
+							[
+								'ip_address' => (string) ($row['ip_address'] ?? ''),
+								'user_agent' => (string) ($row['user_agent'] ?? ''),
+								'referrer' => (string) ($row['referrer'] ?? ''),
+								'request_uri' => (string) ($row['request_uri'] ?? ''),
+								'accept_language' => (string) ($row['accept_language'] ?? ''),
+								'remote_host' => (string) ($row['remote_host'] ?? ''),
+							],
+							true
+						);
+					}
+				} catch (Throwable $e) {
+				}
+			}
+		}
+
+		$clientExprSingle = $classAvailable ? "COALESCE(NULLIF(c.email_client_guess,''), $emailCaseExpr)" : $emailCaseExpr;
+		$trafficExprSingle = $classAvailable ? "COALESCE(NULLIF(c.traffic_type,''), 'unknown')" : "CASE WHEN $clientExprSingle IN ('gmail','yahoo_mail') THEN 'proxy' ELSE 'unknown' END";
+		$ispExprSingle = $classAvailable
+			? "COALESCE(NULLIF(c.isp_guess,''), 'unknown')"
+			: $ispExpr;
+
+		$summarySql =
+			"SELECT
+				COUNT(*) AS hits,
+				MIN(h.hit_at) AS first_seen,
+				MAX(h.hit_at) AS last_seen,
+				COUNT(DISTINCT DATE(h.hit_at)) AS active_days,
+				COUNT(DISTINCT $referrerDomainExpr) AS unique_ref_domains,
+				COUNT(DISTINCT COALESCE(NULLIF(TRIM(h.user_agent),''),'-')) AS unique_user_agents
+			 FROM $hitTable h
+			 " . ($classAvailable ? "LEFT JOIN $classTable c ON c.hit_id = h.id" : '') . "
+			 WHERE $sourceFilterSql AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc";
+		$summaryStmt = db()->prepare($summarySql);
+		$summaryStmt->execute(array_merge($sourceParams, [
+			'ip_address' => $ipAddress,
+			'cutoff_utc' => $cutoffUtc,
+		]));
+		$summary = array_merge($summary, (array) $summaryStmt->fetch());
+
+		$balancedVisitsSql =
+			"WITH ordered_hits AS (
+				SELECT
+					h.hit_at,
+					LAG(h.hit_at) OVER (
+						PARTITION BY CONCAT(COALESCE(h.ip_address, ''), '|', MD5(CONCAT(COALESCE(h.user_agent, ''), '|', COALESCE(h.accept_language, ''))))
+						ORDER BY h.hit_at
+					) AS prev_hit
+				FROM $hitTable h
+				WHERE $sourceFilterSql AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+			)
+			SELECT COALESCE(SUM(CASE WHEN prev_hit IS NULL OR TIMESTAMPDIFF(MINUTE, prev_hit, hit_at) > 30 THEN 1 ELSE 0 END), 0) AS estimated_visits_balanced
+			FROM ordered_hits";
+		$balancedVisitsStmt = db()->prepare($balancedVisitsSql);
+		$balancedVisitsStmt->execute(array_merge($sourceParams, [
+			'ip_address' => $ipAddress,
+			'cutoff_utc' => $cutoffUtc,
+		]));
+		$balancedVisitsRow = (array) $balancedVisitsStmt->fetch();
+		$summary['estimated_visits_balanced'] = (int) ($balancedVisitsRow['estimated_visits_balanced'] ?? 0);
+
+		$timelineSql =
+			"SELECT DATE(h.hit_at) AS bucket, COUNT(*) AS hits
+			 FROM $hitTable h
+			 WHERE $sourceFilterSql AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+			 GROUP BY bucket
+			 ORDER BY bucket ASC";
+		$timelineStmt = db()->prepare($timelineSql);
+		$timelineStmt->execute(array_merge($sourceParams, [
+			'ip_address' => $ipAddress,
+			'cutoff_utc' => $cutoffUtc,
+		]));
+		$timelineRows = $timelineStmt->fetchAll();
+
+		$refSql =
+			"SELECT $referrerDomainExpr AS ref_domain, COUNT(*) AS hits
+			 FROM $hitTable h
+			 WHERE $sourceFilterSql AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+			 GROUP BY ref_domain
+			 ORDER BY hits DESC
+			 LIMIT 10";
+		$refStmt = db()->prepare($refSql);
+		$refStmt->execute(array_merge($sourceParams, [
+			'ip_address' => $ipAddress,
+			'cutoff_utc' => $cutoffUtc,
+		]));
+		$referrerRows = $refStmt->fetchAll();
+
+		$uaSql =
+			"SELECT COALESCE(NULLIF(TRIM(h.user_agent),''),'-') AS user_agent, COUNT(*) AS hits
+			 FROM $hitTable h
+			 WHERE $sourceFilterSql AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+			 GROUP BY user_agent
+			 ORDER BY hits DESC
+			 LIMIT 10";
+		$uaStmt = db()->prepare($uaSql);
+		$uaStmt->execute(array_merge($sourceParams, [
+			'ip_address' => $ipAddress,
+			'cutoff_utc' => $cutoffUtc,
+		]));
+		$userAgentRows = $uaStmt->fetchAll();
+
+		$clientSql =
+			"SELECT $clientExprSingle AS client_name, $trafficExprSingle AS traffic_type, $ispExprSingle AS isp_name, COUNT(*) AS hits
+			 FROM $hitTable h
+			 " . ($classAvailable ? "LEFT JOIN $classTable c ON c.hit_id = h.id" : '') . "
+			 WHERE $sourceFilterSql AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
+			 GROUP BY client_name, traffic_type, isp_name
+			 ORDER BY hits DESC";
+		$clientStmt = db()->prepare($clientSql);
+		$clientStmt->execute(array_merge($sourceParams, [
+			'ip_address' => $ipAddress,
+			'cutoff_utc' => $cutoffUtc,
+		]));
+		$clientRows = $clientStmt->fetchAll();
+
+		$crossSql =
+			"SELECT :source_type AS source_type, $keyColumn AS source_key, COUNT(*) AS hits, MIN(hit_at) AS first_seen, MAX(hit_at) AS last_seen
+			 FROM $hitTable
+			 WHERE ip_address = :ip_address
+			 GROUP BY $keyColumn
+			 ORDER BY hits DESC
+			 LIMIT 15";
+		$crossStmt = db()->prepare($crossSql);
+		$crossStmt->execute([
+			'source_type' => $sourceType,
+			'ip_address' => $ipAddress,
+		]);
+		$crossSourceRows = $crossStmt->fetchAll();
+
+		$recentSql =
+			"SELECT :source_type AS source_type, $keyColumn AS source_key, hit_at, referrer, user_agent, remote_host
+			 FROM $hitTable
+			 WHERE " . ($sourceType === 'ad' ? "$keyColumn = :source_key" : "$idColumn = :source_id") . " AND ip_address = :ip_address AND hit_at >= :cutoff_utc
+			 ORDER BY hit_at DESC
+			 LIMIT 100";
+		$recentStmt = db()->prepare($recentSql);
+		$recentStmt->execute(array_merge(['source_type' => $sourceType], $sourceParams, [
+			'ip_address' => $ipAddress,
+			'cutoff_utc' => $cutoffUtc,
+		]));
+		$recentRows = $recentStmt->fetchAll();
+	}
 }
 
-$displayName = $sourceType === 'redirect' ? 'Redirect IP Drilldown' : ($sourceType === 'ad' ? 'Ad IP Drilldown' : 'IP Drilldown');
-$backAnalyticsHref = $sourceType === 'ad'
+if ($recentTotalRows > 0) {
+	$recentDisplayStart = (($recentPage - 1) * $recentPerPage) + 1;
+	$recentDisplayEnd = min((($recentPage - 1) * $recentPerPage) + count($recentRows), $recentTotalRows);
+}
+
+
+$displayName = $isAllSourcesView ? 'IP Activity Drilldown' : ($sourceType === 'redirect' ? 'Redirect IP Drilldown' : ($sourceType === 'ad' ? 'Ad IP Drilldown' : 'IP Drilldown'));
+$backAnalyticsHref = $isAllSourcesView
+	? 'index.php'
+	: ($sourceType === 'ad'
 	? 'ad-analytics.php?period=' . urlencode($period) . ($sourceKey !== '' ? '&ad_key=' . urlencode($sourceKey) : '')
-	: 'analytics.php?source_type=' . urlencode($sourceType) . ($sourceType === 'redirect' ? '&redirect_key=' . urlencode($sourceKey) : '&pixel_key=' . urlencode($sourceKey)) . '&period=' . urlencode($period);
-$backStatsHref = $sourceType === 'ad'
+	: 'analytics.php?source_type=' . urlencode($sourceType) . ($sourceType === 'redirect' ? '&redirect_key=' . urlencode($sourceKey) : '&pixel_key=' . urlencode($sourceKey)) . '&period=' . urlencode($period));
+$backStatsHref = $isAllSourcesView || $sourceType === 'ad'
 	? null
 	: 'stats.php?source_type=' . urlencode($sourceType) . ($sourceType === 'redirect' ? '&redirect_key=' . urlencode($sourceKey) : '&pixel_key=' . urlencode($sourceKey)) . '&period=' . urlencode($period);
+$displayName = 'IP Activity Drilldown';
+$backAnalyticsHref = 'index.php';
+$backStatsHref = null;
 
 render_header('IP Drilldown');
 ?>
 <div class="spaced card">
 	<div>
 		<h1><?php echo e($displayName); ?></h1>
-		<p class="muted">Analyze one IP address within a source and across that source type.</p>
+		<p class="muted">Analyze one IP address across all available sources (Ad, Pixel, Redirect).</p>
 	</div>
 	<div class="inline">
-		<a class="nav-btn" href="<?php echo e($backAnalyticsHref); ?>">Back to analytics</a>
+		<a class="nav-btn" href="<?php echo e($backAnalyticsHref); ?>">Back to dashboard</a>
 		<?php if ($backStatsHref !== null): ?>
 			<a class="nav-btn" href="<?php echo e($backStatsHref); ?>">Back to stats</a>
 		<?php endif; ?>
@@ -443,49 +585,8 @@ render_header('IP Drilldown');
 	</div>
 </div>
 
-<?php if (!$hasRedirectTables): ?>
-	<div class="error">Redirect analytics tables not migrated yet. Run <a href="../migrate.php">migrations</a> to enable redirect drilldown.</div>
-<?php endif; ?>
-
-<?php if ($sourceType === 'ad' && !$hasAdTables): ?>
-	<div class="error">Ad analytics table not migrated yet. Run <a href="../migrate.php">migrations</a> to enable ad drilldown.</div>
-<?php endif; ?>
-
 <div class="card">
 	<form method="get" class="row">
-		<div>
-			<label>Source Type</label>
-			<select name="source_type">
-				<option value="pixel" <?php echo $sourceType === 'pixel' ? 'selected' : ''; ?>>Pixel</option>
-				<option value="redirect" <?php echo $sourceType === 'redirect' ? 'selected' : ''; ?>>Redirect URL</option>
-				<option value="ad" <?php echo $sourceType === 'ad' ? 'selected' : ''; ?>>Ad</option>
-			</select>
-		</div>
-		<div>
-			<label><?php echo $sourceType === 'redirect' ? 'Redirect ID' : ($sourceType === 'ad' ? 'Ad Key' : 'Pixel ID'); ?></label>
-			<?php if ($sourceType === 'redirect'): ?>
-				<select name="redirect_key">
-					<option value="">Select redirect</option>
-					<?php foreach ($redirects as $redirect): ?>
-						<option value="<?php echo e((string) $redirect['redirect_key']); ?>" <?php echo $sourceKey === (string) $redirect['redirect_key'] ? 'selected' : ''; ?>><?php echo e((string) $redirect['redirect_key']); ?> (<?php echo e((string) $redirect['total_hits']); ?>)</option>
-					<?php endforeach; ?>
-				</select>
-			<?php elseif ($sourceType === 'ad'): ?>
-				<select name="ad_key">
-					<option value="">Select ad</option>
-					<?php foreach ($ads as $ad): ?>
-						<option value="<?php echo e((string) $ad['ad_key']); ?>" <?php echo $sourceKey === (string) $ad['ad_key'] ? 'selected' : ''; ?>><?php echo e((string) $ad['ad_key']); ?> (<?php echo e((string) $ad['total_hits']); ?>)</option>
-					<?php endforeach; ?>
-				</select>
-			<?php else: ?>
-				<select name="pixel_key">
-					<option value="">Select pixel</option>
-					<?php foreach ($pixels as $pixel): ?>
-						<option value="<?php echo e((string) $pixel['pixel_key']); ?>" <?php echo $sourceKey === (string) $pixel['pixel_key'] ? 'selected' : ''; ?>><?php echo e((string) $pixel['pixel_key']); ?> (<?php echo e((string) $pixel['total_hits']); ?>)</option>
-					<?php endforeach; ?>
-				</select>
-			<?php endif; ?>
-		</div>
 		<div>
 			<label>IP Address</label>
 			<input type="text" name="ip" value="<?php echo e($ipAddress); ?>" placeholder="74.125.215.2" maxlength="45">
@@ -498,15 +599,12 @@ render_header('IP Drilldown');
 				<?php endforeach; ?>
 			</select>
 		</div>
+		<input type="hidden" name="recent_page" value="1">
 		<div style="align-self:end;"><button type="submit">Load IP Details</button></div>
 	</form>
 </div>
 
-<?php if ($sourceKey !== '' && !$selectedSource): ?>
-	<div class="error"><?php echo e($sourceType === 'redirect' ? 'Redirect not found.' : ($sourceType === 'ad' ? 'Ad not found.' : 'Pixel not found.')); ?></div>
-<?php endif; ?>
-
-<?php if ($selectedSource && $ipAddress === ''): ?>
+<?php if ($canLoadIpDetails === false && $ipAddress === ''): ?>
 	<div class="error">Enter an IP address to load details.</div>
 <?php endif; ?>
 
@@ -520,10 +618,10 @@ render_header('IP Drilldown');
 	<div class="error">Unable to save IP tag right now. Please try again.</div>
 <?php endif; ?>
 
-<?php if ($selectedSource && $ipAddress !== ''): ?>
+<?php if ($canLoadIpDetails): ?>
 	<div class="card">
 		<h2>IP: <?php echo e($ipDisplayLabel); ?></h2>
-		<p class="muted">Source: <?php echo e((string) $selectedSource['source_key']); ?> | Period: <?php echo e($period); ?> | UTC Window start: <?php echo e($cutoffUtc); ?></p>
+		<p class="muted">Scope: <?php echo e($isAllSourcesView ? 'All sources' : (string) $selectedSource['source_key']); ?> | Period: <?php echo e($period); ?> | UTC Window start: <?php echo e($cutoffUtc); ?></p>
 	</div>
 
 	<div class="row">
@@ -557,16 +655,10 @@ render_header('IP Drilldown');
 					<td>
 						<form method="post" class="inline" style="gap:8px;align-items:center;flex-wrap:wrap;">
 							<input type="hidden" name="action" value="save_ip_tag">
-							<input type="hidden" name="source_type" value="<?php echo e($sourceType); ?>">
-							<?php if ($sourceType === 'redirect'): ?>
-								<input type="hidden" name="redirect_key" value="<?php echo e((string) $selectedSource['source_key']); ?>">
-							<?php elseif ($sourceType === 'ad'): ?>
-								<input type="hidden" name="ad_key" value="<?php echo e((string) $selectedSource['source_key']); ?>">
-							<?php else: ?>
-								<input type="hidden" name="pixel_key" value="<?php echo e((string) $selectedSource['source_key']); ?>">
-							<?php endif; ?>
+							<input type="hidden" name="source_type" value="all">
 							<input type="hidden" name="ip" value="<?php echo e($ipAddress); ?>">
 							<input type="hidden" name="period" value="<?php echo e($period); ?>">
+							<input type="hidden" name="recent_page" value="<?php echo (int) $recentPage; ?>">
 							<input type="text" name="operator_tag" value="<?php echo e($ipOperatorTag); ?>" maxlength="191" placeholder="alias this IP address" style="width:220px;max-width:100%;">
 							<button type="submit">Save</button>
 						</form>
@@ -646,39 +738,37 @@ render_header('IP Drilldown');
 	<div class="card">
 		<h3>Cross-Source Activity for this IP</h3>
 		<table>
-			<thead><tr><th>Source Key</th><th>Hits</th><th>First Seen</th><th>Last Seen</th><th>Open</th></tr></thead>
+			<thead><tr><th>Source Type</th><th>Source Key</th><th>Hits</th><th>First Seen</th><th>Last Seen</th><th>Open</th></tr></thead>
 			<tbody>
 			<?php if (!$crossSourceRows): ?>
-				<tr><td colspan="5" class="muted">No data.</td></tr>
+				<tr><td colspan="6" class="muted">No data.</td></tr>
 			<?php else: ?>
 				<?php foreach ($crossSourceRows as $row): ?>
 						<?php
+						$crossSourceType = (string) ($row['source_type'] ?? $sourceType);
 						$crossSourceKey = (string) ($row['source_key'] ?? '');
 						$crossSourceStatsParams = [
-							'source_type' => $sourceType,
+							'source_type' => $crossSourceType,
 							'period' => $period,
 						];
-						if ($sourceType === 'redirect') {
+						if ($crossSourceType === 'redirect') {
 							$crossSourceStatsParams['redirect_key'] = $crossSourceKey;
-						} elseif ($sourceType === 'ad') {
+						} elseif ($crossSourceType === 'ad') {
 							$crossSourceStatsParams['ad_key'] = $crossSourceKey;
 						} else {
 							$crossSourceStatsParams['pixel_key'] = $crossSourceKey;
 						}
-						$crossSourceStatsHref = $sourceType === 'ad'
+						$crossSourceStatsHref = $crossSourceType === 'ad'
 							? 'ad-analytics.php?' . http_build_query(['period' => $period, 'ad_key' => $crossSourceKey])
 							: 'stats.php?' . http_build_query($crossSourceStatsParams);
-						$crossSourceOpenHref = 'ip-details.php?source_type=' . urlencode($sourceType);
-						if ($sourceType === 'redirect') {
-							$crossSourceOpenHref .= '&redirect_key=' . urlencode($crossSourceKey);
-						} elseif ($sourceType === 'ad') {
-							$crossSourceOpenHref .= '&ad_key=' . urlencode($crossSourceKey);
-						} else {
-							$crossSourceOpenHref .= '&pixel_key=' . urlencode($crossSourceKey);
-						}
-						$crossSourceOpenHref .= '&ip=' . urlencode($ipAddress) . '&period=' . urlencode($period);
+						$crossSourceOpenHref = 'ip-details.php?' . http_build_query([
+							'ip' => $ipAddress,
+							'period' => $period,
+							'recent_page' => 1,
+						]);
 						?>
 					<tr>
+							<td><?php echo e(ucfirst($crossSourceType)); ?></td>
 							<td><a href="<?php echo e($crossSourceStatsHref); ?>"><?php echo e($crossSourceKey); ?></a></td>
 						<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
 						<td><?php echo e(format_db_datetime((string) ($row['first_seen'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
@@ -693,15 +783,22 @@ render_header('IP Drilldown');
 
 	<div class="card">
 		<h3>Recent Hits</h3>
+		<p class="muted">Showing <?php echo number_format($recentDisplayStart); ?>-<?php echo number_format($recentDisplayEnd); ?> of <?php echo number_format($recentTotalRows); ?> hits.</p>
 		<table>
-			<thead><tr><th>Date/Time</th><th>Referrer</th><th>User Agent</th><th>Remote Host</th></tr></thead>
+			<thead><tr><th>Date/Time</th><th>Source</th><th>Referrer</th><th>User Agent</th><th>Remote Host</th></tr></thead>
 			<tbody>
 			<?php if (!$recentRows): ?>
-				<tr><td colspan="4" class="muted">No data.</td></tr>
+				<tr><td colspan="5" class="muted">No data.</td></tr>
 			<?php else: ?>
 				<?php foreach ($recentRows as $row): ?>
+					<?php
+					$recentSourceType = (string) ($row['source_type'] ?? $sourceType);
+					$recentSourceKey = (string) ($row['source_key'] ?? ($selectedSource['source_key'] ?? ''));
+					$recentSourceLabel = ucfirst($recentSourceType) . ($recentSourceKey !== '' ? ': ' . $recentSourceKey : '');
+					?>
 					<tr>
 						<td><?php echo e(format_db_datetime((string) ($row['hit_at'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
+						<td><?php echo e($recentSourceLabel); ?></td>
 						<td><?php echo e((string) (($row['referrer'] ?? '') !== '' ? $row['referrer'] : '-')); ?></td>
 						<td><?php echo e((string) (($row['user_agent'] ?? '') !== '' ? $row['user_agent'] : '-')); ?></td>
 						<td><?php echo e((string) (($row['remote_host'] ?? '') !== '' ? $row['remote_host'] : '-')); ?></td>
@@ -710,6 +807,33 @@ render_header('IP Drilldown');
 			<?php endif; ?>
 			</tbody>
 		</table>
+		<?php if ($recentTotalPages > 1): ?>
+			<?php $recentBaseParams = ['ip' => $ipAddress, 'period' => $period]; ?>
+			<div class="inline" style="margin-top:10px;">
+				<?php if ($recentPage > 1): ?>
+					<?php $recentFirst = $recentBaseParams; $recentFirst['recent_page'] = 1; ?>
+					<a class="nav-btn" href="ip-details.php?<?php echo e(http_build_query($recentFirst)); ?>">First</a>
+					<?php $recentPrev = $recentBaseParams; $recentPrev['recent_page'] = $recentPage - 1; ?>
+					<a class="nav-btn" href="ip-details.php?<?php echo e(http_build_query($recentPrev)); ?>">Previous</a>
+				<?php endif; ?>
+				<span class="muted">Page <?php echo (int) $recentPage; ?> of <?php echo (int) $recentTotalPages; ?></span>
+				<?php if ($recentPage < $recentTotalPages): ?>
+					<?php $recentNext = $recentBaseParams; $recentNext['recent_page'] = $recentPage + 1; ?>
+					<a class="nav-btn" href="ip-details.php?<?php echo e(http_build_query($recentNext)); ?>">Next</a>
+					<?php $recentLast = $recentBaseParams; $recentLast['recent_page'] = $recentTotalPages; ?>
+					<a class="nav-btn" href="ip-details.php?<?php echo e(http_build_query($recentLast)); ?>">Last</a>
+				<?php endif; ?>
+				<form method="get" class="inline" style="margin:0;">
+					<input type="hidden" name="ip" value="<?php echo e($ipAddress); ?>">
+					<input type="hidden" name="period" value="<?php echo e($period); ?>">
+					<label style="display:flex;align-items:center;gap:6px;">
+						<span class="muted">Go to page</span>
+						<input type="number" name="recent_page" min="1" max="<?php echo (int) $recentTotalPages; ?>" value="<?php echo (int) $recentPage; ?>" style="width:88px;">
+					</label>
+					<button type="submit">Go</button>
+				</form>
+			</div>
+		<?php endif; ?>
 	</div>
 <?php endif; ?>
 <?php
