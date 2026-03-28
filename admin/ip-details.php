@@ -738,10 +738,10 @@ render_header('IP Drilldown');
 	<div class="card">
 		<h3>Cross-Source Activity for this IP</h3>
 		<table>
-			<thead><tr><th>Source Type</th><th>Source Key</th><th>Hits</th><th>First Seen</th><th>Last Seen</th><th>Open</th></tr></thead>
+			<thead><tr><th>Source Type</th><th>Source Key</th><th>Hits</th><th>First Seen</th><th>Last Seen</th></tr></thead>
 			<tbody>
 			<?php if (!$crossSourceRows): ?>
-				<tr><td colspan="6" class="muted">No data.</td></tr>
+				<tr><td colspan="5" class="muted">No data.</td></tr>
 			<?php else: ?>
 				<?php foreach ($crossSourceRows as $row): ?>
 						<?php
@@ -761,11 +761,6 @@ render_header('IP Drilldown');
 						$crossSourceStatsHref = $crossSourceType === 'ad'
 							? 'ad-analytics.php?' . http_build_query(['period' => $period, 'ad_key' => $crossSourceKey])
 							: 'stats.php?' . http_build_query($crossSourceStatsParams);
-						$crossSourceOpenHref = 'ip-details.php?' . http_build_query([
-							'ip' => $ipAddress,
-							'period' => $period,
-							'recent_page' => 1,
-						]);
 						?>
 					<tr>
 							<td><?php echo e(ucfirst($crossSourceType)); ?></td>
@@ -773,7 +768,6 @@ render_header('IP Drilldown');
 						<td><?php echo e((string) ($row['hits'] ?? 0)); ?></td>
 						<td><?php echo e(format_db_datetime((string) ($row['first_seen'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
 						<td><?php echo e(format_db_datetime((string) ($row['last_seen'] ?? ''), 'Y-m-d H:i:s', '-')); ?></td>
-						<td><a href="<?php echo e($crossSourceOpenHref); ?>">Open</a></td>
 					</tr>
 				<?php endforeach; ?>
 			<?php endif; ?>
