@@ -49,6 +49,7 @@ $formatStoredLocalTime = static function (?string $value) use ($displayTimezone)
 $schemaReady = false;
 $schemaMissing = [];
 $hasAdRulesTable = false;
+$hasAdEntryColumns = false;
 try {
 	$pdo = db();
 	$hasAdRulesTable = table_exists($pdo, 'pd_ad_rules');
@@ -61,6 +62,7 @@ try {
 				$schemaMissing[] = 'column pd_ad_hit_logs.' . $column;
 			}
 		}
+		$hasAdEntryColumns = column_exists($pdo, 'pd_ad_hit_logs', 'entry_url') && column_exists($pdo, 'pd_ad_hit_logs', 'entry_referrer');
 	}
 	$schemaReady = count($schemaMissing) === 0;
 } catch (Throwable $e) {
@@ -187,7 +189,8 @@ if ($schemaReady) {
 	}
 
 	$recentSql =
-		"SELECT l.id, l.hit_at, l.ad_key, l.ip_address, l.traffic_type, l.country_code, l.isp_name, l.matched, l.matched_action_type, l.referrer, "
+		"SELECT l.id, l.hit_at, l.ad_key, l.ip_address, l.traffic_type, l.country_code, l.isp_name, l.matched, l.matched_action_type, "
+		. ($hasAdEntryColumns ? 'l.entry_url, l.entry_referrer, ' : 'NULL AS entry_url, NULL AS entry_referrer, ')
 		. ($hasAdRulesTable ? 'r.priority AS matched_priority' : 'NULL AS matched_priority')
 		. " FROM pd_ad_hit_logs l "
 		. ($hasAdRulesTable ? 'LEFT JOIN pd_ad_rules r ON r.id = l.matched_rule_id ' : '')
@@ -377,6 +380,8 @@ render_header('Targeted Ad Analytics');
 			<th>Priority</th>
 			<th>Action</th>
 			<th>IP</th>
+			<th>Entry URL</th>
+			<th>Entry Referrer</th>
 			<th>Provider</th>
 			<th>Traffic</th>
 			<th>Country</th>
@@ -384,12 +389,14 @@ render_header('Targeted Ad Analytics');
 		</thead>
 		<tbody>
 		<?php if (!$recentRows): ?>
-			<tr><td colspan="9" class="muted">No tracked events in selected filters.</td></tr>
+			<tr><td colspan="11" class="muted">No tracked events in selected filters.</td></tr>
 		<?php else: ?>
 			<?php foreach ($recentRows as $row): ?>
 				<?php
 				$ipValue = (string) ($row['ip_address'] ?? '');
 				$ipDisplay = format_ip_with_operator_tag($ipValue, (string) ($ipTagMap[$ipValue] ?? ''));
+				$entryUrl = trim((string) ($row['entry_url'] ?? ''));
+				$entryReferrer = trim((string) ($row['entry_referrer'] ?? ''));
 				$recentRowAdKey = sanitize_ad_key((string) ($row['ad_key'] ?? ''));
 				$recentIpLinkQuery = ['type' => 'ip', 'value' => $ipValue, 'period' => $period];
 				if ($recentRowAdKey !== '') {
@@ -406,6 +413,8 @@ render_header('Targeted Ad Analytics');
 					<td><?php echo e($priorityLabel); ?></td>
 					<td><?php echo e((string) ($row['matched_action_type'] ?? '-')); ?></td>
 					<td><a href="ad-linkout.php?<?php echo e(http_build_query($recentIpLinkQuery)); ?>"><?php echo e($ipDisplay !== '' ? $ipDisplay : $ipValue); ?></a></td>
+					<td style="max-width:280px; overflow-wrap:anywhere; word-break:break-word;"><?php echo e($entryUrl !== '' ? $entryUrl : '-'); ?></td>
+					<td style="max-width:280px; overflow-wrap:anywhere; word-break:break-word;"><?php echo e($entryReferrer !== '' ? $entryReferrer : '-'); ?></td>
 					<td><?php echo e((string) (($row['isp_name'] ?? '') !== '' ? $row['isp_name'] : 'unknown')); ?></td>
 					<td><?php echo e((string) ($row['traffic_type'] ?? 'unknown')); ?></td>
 					<td><?php echo e((string) (($row['country_code'] ?? '') !== '' ? $row['country_code'] : '-')); ?></td>

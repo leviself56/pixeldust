@@ -596,6 +596,8 @@ function run_schema_migrations(PDO $pdo): array
 				ip_address VARCHAR(45) NOT NULL,
 				user_agent TEXT NULL,
 				referrer TEXT NULL,
+				entry_url TEXT NULL,
+				entry_referrer TEXT NULL,
 				request_uri TEXT NULL,
 				query_string TEXT NULL,
 				accept_language VARCHAR(255) NULL,
@@ -623,6 +625,30 @@ function run_schema_migrations(PDO $pdo): array
 		$applied[] = 'Created table pd_ad_hit_logs';
 	}
 
+	if (!table_exists($pdo, 'pd_access_log_events')) {
+		$pdo->exec(
+			'CREATE TABLE pd_access_log_events (
+				id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+				hit_at DATETIME NOT NULL,
+				ip_address VARCHAR(45) NOT NULL,
+				user_agent_hash CHAR(40) NOT NULL,
+				user_agent TEXT NULL,
+				request_uri TEXT NULL,
+				request_path VARCHAR(255) NULL,
+				query_string TEXT NULL,
+				referrer TEXT NULL,
+				source_type VARCHAR(20) NULL,
+				is_tracking_endpoint TINYINT(1) NOT NULL DEFAULT 0,
+				is_page_request TINYINT(1) NOT NULL DEFAULT 0,
+				created_at DATETIME NOT NULL,
+				INDEX idx_ip_hit_at (ip_address, hit_at),
+				INDEX idx_ip_ua_hit_at (ip_address, user_agent_hash, hit_at),
+				INDEX idx_page_lookup (is_page_request, ip_address, hit_at)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+		);
+		$applied[] = 'Created table pd_access_log_events';
+	}
+
 	$pixelColumns = [
 		'label' => 'ALTER TABLE pd_pixels ADD COLUMN label VARCHAR(191) NOT NULL DEFAULT "" AFTER pixel_key',
 		'created_by' => 'ALTER TABLE pd_pixels ADD COLUMN created_by INT UNSIGNED NULL AFTER label',
@@ -645,6 +671,8 @@ function run_schema_migrations(PDO $pdo): array
 		'ip_address' => 'ALTER TABLE pd_pixel_hits ADD COLUMN ip_address VARCHAR(45) NOT NULL AFTER hit_at',
 		'user_agent' => 'ALTER TABLE pd_pixel_hits ADD COLUMN user_agent TEXT NULL AFTER ip_address',
 		'referrer' => 'ALTER TABLE pd_pixel_hits ADD COLUMN referrer TEXT NULL AFTER user_agent',
+		'entry_url' => 'ALTER TABLE pd_pixel_hits ADD COLUMN entry_url TEXT NULL AFTER referrer',
+		'entry_referrer' => 'ALTER TABLE pd_pixel_hits ADD COLUMN entry_referrer TEXT NULL AFTER entry_url',
 		'request_uri' => 'ALTER TABLE pd_pixel_hits ADD COLUMN request_uri TEXT NULL AFTER referrer',
 		'query_string' => 'ALTER TABLE pd_pixel_hits ADD COLUMN query_string TEXT NULL AFTER request_uri',
 		'accept_language' => 'ALTER TABLE pd_pixel_hits ADD COLUMN accept_language VARCHAR(255) NULL AFTER query_string',
@@ -682,6 +710,8 @@ function run_schema_migrations(PDO $pdo): array
 		'ip_address' => 'ALTER TABLE pd_redirect_hits ADD COLUMN ip_address VARCHAR(45) NOT NULL AFTER hit_at',
 		'user_agent' => 'ALTER TABLE pd_redirect_hits ADD COLUMN user_agent TEXT NULL AFTER ip_address',
 		'referrer' => 'ALTER TABLE pd_redirect_hits ADD COLUMN referrer TEXT NULL AFTER user_agent',
+		'entry_url' => 'ALTER TABLE pd_redirect_hits ADD COLUMN entry_url TEXT NULL AFTER referrer',
+		'entry_referrer' => 'ALTER TABLE pd_redirect_hits ADD COLUMN entry_referrer TEXT NULL AFTER entry_url',
 		'request_uri' => 'ALTER TABLE pd_redirect_hits ADD COLUMN request_uri TEXT NULL AFTER referrer',
 		'query_string' => 'ALTER TABLE pd_redirect_hits ADD COLUMN query_string TEXT NULL AFTER request_uri',
 		'accept_language' => 'ALTER TABLE pd_redirect_hits ADD COLUMN accept_language VARCHAR(255) NULL AFTER query_string',
@@ -876,6 +906,8 @@ function run_schema_migrations(PDO $pdo): array
 		'ip_address' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN ip_address VARCHAR(45) NOT NULL AFTER hit_at',
 		'user_agent' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN user_agent TEXT NULL AFTER ip_address',
 		'referrer' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN referrer TEXT NULL AFTER user_agent',
+		'entry_url' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN entry_url TEXT NULL AFTER referrer',
+		'entry_referrer' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN entry_referrer TEXT NULL AFTER entry_url',
 		'request_uri' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN request_uri TEXT NULL AFTER referrer',
 		'query_string' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN query_string TEXT NULL AFTER request_uri',
 		'accept_language' => 'ALTER TABLE pd_ad_hit_logs ADD COLUMN accept_language VARCHAR(255) NULL AFTER query_string',
@@ -903,6 +935,28 @@ function run_schema_migrations(PDO $pdo): array
 		}
 	}
 
+	$accessLogEventColumns = [
+		'hit_at' => 'ALTER TABLE pd_access_log_events ADD COLUMN hit_at DATETIME NOT NULL AFTER id',
+		'ip_address' => 'ALTER TABLE pd_access_log_events ADD COLUMN ip_address VARCHAR(45) NOT NULL AFTER hit_at',
+		'user_agent_hash' => 'ALTER TABLE pd_access_log_events ADD COLUMN user_agent_hash CHAR(40) NOT NULL AFTER ip_address',
+		'user_agent' => 'ALTER TABLE pd_access_log_events ADD COLUMN user_agent TEXT NULL AFTER user_agent_hash',
+		'request_uri' => 'ALTER TABLE pd_access_log_events ADD COLUMN request_uri TEXT NULL AFTER user_agent',
+		'request_path' => 'ALTER TABLE pd_access_log_events ADD COLUMN request_path VARCHAR(255) NULL AFTER request_uri',
+		'query_string' => 'ALTER TABLE pd_access_log_events ADD COLUMN query_string TEXT NULL AFTER request_path',
+		'referrer' => 'ALTER TABLE pd_access_log_events ADD COLUMN referrer TEXT NULL AFTER query_string',
+		'source_type' => 'ALTER TABLE pd_access_log_events ADD COLUMN source_type VARCHAR(20) NULL AFTER referrer',
+		'is_tracking_endpoint' => 'ALTER TABLE pd_access_log_events ADD COLUMN is_tracking_endpoint TINYINT(1) NOT NULL DEFAULT 0 AFTER source_type',
+		'is_page_request' => 'ALTER TABLE pd_access_log_events ADD COLUMN is_page_request TINYINT(1) NOT NULL DEFAULT 0 AFTER is_tracking_endpoint',
+		'created_at' => 'ALTER TABLE pd_access_log_events ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER is_page_request',
+	];
+
+	foreach ($accessLogEventColumns as $column => $sql) {
+		if (!column_exists($pdo, 'pd_access_log_events', $column)) {
+			$pdo->exec($sql);
+			$applied[] = 'Added column pd_access_log_events.' . $column;
+		}
+	}
+
 	$indexes = [
 		['table' => 'pd_pixels', 'name' => 'idx_pixel_key', 'sql' => 'CREATE INDEX idx_pixel_key ON pd_pixels (pixel_key)'],
 		['table' => 'pd_pixel_hits', 'name' => 'idx_pixel_id', 'sql' => 'CREATE INDEX idx_pixel_id ON pd_pixel_hits (pixel_id)'],
@@ -912,6 +966,7 @@ function run_schema_migrations(PDO $pdo): array
 		['table' => 'pd_pixel_hits', 'name' => 'idx_pixel_ip_time', 'sql' => 'CREATE INDEX idx_pixel_ip_time ON pd_pixel_hits (pixel_id, ip_address, hit_at)'],
 		['table' => 'pd_pixel_hits', 'name' => 'idx_pixel_ref_time', 'sql' => 'CREATE INDEX idx_pixel_ref_time ON pd_pixel_hits (pixel_id, referrer(191), hit_at)'],
 		['table' => 'pd_pixel_hits', 'name' => 'idx_pixel_host_time', 'sql' => 'CREATE INDEX idx_pixel_host_time ON pd_pixel_hits (pixel_id, remote_host(191), hit_at)'],
+		['table' => 'pd_pixel_hits', 'name' => 'idx_pixel_entry_missing', 'sql' => 'CREATE INDEX idx_pixel_entry_missing ON pd_pixel_hits (ip_address, hit_at)'],
 		['table' => 'pd_trigger_actions', 'name' => 'idx_trigger_id', 'sql' => 'CREATE INDEX idx_trigger_id ON pd_trigger_actions (trigger_id)'],
 		['table' => 'pd_trigger_actions', 'name' => 'idx_is_active', 'sql' => 'CREATE INDEX idx_is_active ON pd_trigger_actions (is_active)'],
 		['table' => 'pd_trigger_actions', 'name' => 'idx_is_default', 'sql' => 'CREATE INDEX idx_is_default ON pd_trigger_actions (is_default)'],
@@ -933,6 +988,7 @@ function run_schema_migrations(PDO $pdo): array
 		['table' => 'pd_redirect_hits', 'name' => 'idx_hit_at', 'sql' => 'CREATE INDEX idx_hit_at ON pd_redirect_hits (hit_at)'],
 		['table' => 'pd_redirect_hits', 'name' => 'idx_redirect_time', 'sql' => 'CREATE INDEX idx_redirect_time ON pd_redirect_hits (redirect_id, hit_at)'],
 		['table' => 'pd_redirect_hits', 'name' => 'idx_redirect_ip_time', 'sql' => 'CREATE INDEX idx_redirect_ip_time ON pd_redirect_hits (redirect_id, ip_address, hit_at)'],
+		['table' => 'pd_redirect_hits', 'name' => 'idx_redirect_entry_missing', 'sql' => 'CREATE INDEX idx_redirect_entry_missing ON pd_redirect_hits (ip_address, hit_at)'],
 		['table' => 'pd_redirect_hit_classification', 'name' => 'idx_redirect_time', 'sql' => 'CREATE INDEX idx_redirect_time ON pd_redirect_hit_classification (redirect_id, classified_at)'],
 		['table' => 'pd_redirect_hit_classification', 'name' => 'idx_redirect_ip', 'sql' => 'CREATE INDEX idx_redirect_ip ON pd_redirect_hit_classification (redirect_id, ip_address)'],
 		['table' => 'pd_redirect_hit_classification', 'name' => 'idx_email_client', 'sql' => 'CREATE INDEX idx_email_client ON pd_redirect_hit_classification (email_client_guess)'],
@@ -948,6 +1004,10 @@ function run_schema_migrations(PDO $pdo): array
 		['table' => 'pd_ad_hit_logs', 'name' => 'idx_matched_time', 'sql' => 'CREATE INDEX idx_matched_time ON pd_ad_hit_logs (matched, hit_at)'],
 		['table' => 'pd_ad_hit_logs', 'name' => 'idx_ip_time', 'sql' => 'CREATE INDEX idx_ip_time ON pd_ad_hit_logs (ip_address, hit_at)'],
 		['table' => 'pd_ad_hit_logs', 'name' => 'idx_provider_time', 'sql' => 'CREATE INDEX idx_provider_time ON pd_ad_hit_logs (isp_name(191), hit_at)'],
+		['table' => 'pd_ad_hit_logs', 'name' => 'idx_ad_entry_missing', 'sql' => 'CREATE INDEX idx_ad_entry_missing ON pd_ad_hit_logs (ip_address, hit_at)'],
+		['table' => 'pd_access_log_events', 'name' => 'idx_ip_hit_at', 'sql' => 'CREATE INDEX idx_ip_hit_at ON pd_access_log_events (ip_address, hit_at)'],
+		['table' => 'pd_access_log_events', 'name' => 'idx_ip_ua_hit_at', 'sql' => 'CREATE INDEX idx_ip_ua_hit_at ON pd_access_log_events (ip_address, user_agent_hash, hit_at)'],
+		['table' => 'pd_access_log_events', 'name' => 'idx_page_lookup', 'sql' => 'CREATE INDEX idx_page_lookup ON pd_access_log_events (is_page_request, ip_address, hit_at)'],
 	];
 
 	foreach ($indexes as $indexDef) {
@@ -2384,6 +2444,8 @@ function parse_apache_access_log_raw_line(string $line): ?array
 		$sourceType = 'pixel';
 	} elseif ($scriptName === 'link.php') {
 		$sourceType = 'redirect';
+	} elseif ($scriptName === 'ad.php') {
+		$sourceType = 'ad';
 	}
 
 	$requestUri = $path . ($query !== '' ? '?' . $query : '');
@@ -2408,11 +2470,248 @@ function parse_apache_access_log_line(string $line): ?array
 		return null;
 	}
 
-	if (!in_array((string) ($raw['source_type'] ?? ''), ['pixel', 'redirect'], true)) {
+	if (!in_array((string) ($raw['source_type'] ?? ''), ['pixel', 'redirect', 'ad'], true)) {
 		return null;
 	}
 
 	return $raw;
+}
+
+function is_tracking_endpoint_path(string $path): bool
+{
+	$path = strtolower(trim($path));
+	if ($path === '') {
+		return false;
+	}
+
+	$base = basename($path);
+	return in_array($base, ['pix.php', 'link.php', 'ad.php', 'ad.js'], true);
+}
+
+function is_static_asset_path(string $path): bool
+{
+	$path = strtolower(trim($path));
+	if ($path === '') {
+		return false;
+	}
+
+	$ext = pathinfo($path, PATHINFO_EXTENSION);
+	if (!is_string($ext) || $ext === '') {
+		return false;
+	}
+
+	return in_array(strtolower($ext), ['css', 'js', 'jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'ico', 'woff', 'woff2', 'ttf', 'eot', 'map', 'txt', 'xml'], true);
+}
+
+function ingest_access_log_event(array $rawEvent): bool
+{
+	try {
+		$pdo = db();
+		if (!table_exists($pdo, 'pd_access_log_events')) {
+			return false;
+		}
+
+		$ipAddress = trim((string) ($rawEvent['ip_address'] ?? ''));
+		$hitAtUtc = trim((string) ($rawEvent['hit_at_utc'] ?? ''));
+		$requestUri = trim((string) ($rawEvent['request_uri'] ?? ''));
+		$requestPath = trim((string) ($rawEvent['path'] ?? ''));
+		$queryString = trim((string) ($rawEvent['query_string'] ?? ''));
+		$referrer = trim((string) ($rawEvent['referrer'] ?? ''));
+		$userAgent = trim((string) ($rawEvent['user_agent'] ?? ''));
+		$sourceType = trim((string) ($rawEvent['source_type'] ?? ''));
+
+		if ($ipAddress === '' || $hitAtUtc === '') {
+			return false;
+		}
+
+		$userAgentHash = sha1(strtolower($userAgent));
+		$isTracking = is_tracking_endpoint_path($requestPath) ? 1 : 0;
+		$isPageRequest = ($isTracking === 0 && !is_static_asset_path($requestPath)) ? 1 : 0;
+
+		$stmt = db()->prepare(
+			'INSERT INTO pd_access_log_events
+			 (hit_at, ip_address, user_agent_hash, user_agent, request_uri, request_path, query_string, referrer, source_type, is_tracking_endpoint, is_page_request, created_at)
+			 VALUES
+			 (:hit_at, :ip_address, :user_agent_hash, :user_agent, :request_uri, :request_path, :query_string, :referrer, :source_type, :is_tracking_endpoint, :is_page_request, NOW())'
+		);
+		$stmt->execute([
+			'hit_at' => $hitAtUtc,
+			'ip_address' => substr($ipAddress, 0, 45),
+			'user_agent_hash' => $userAgentHash,
+			'user_agent' => $userAgent !== '' ? $userAgent : null,
+			'request_uri' => $requestUri !== '' ? $requestUri : null,
+			'request_path' => $requestPath !== '' ? substr($requestPath, 0, 255) : null,
+			'query_string' => $queryString !== '' ? $queryString : null,
+			'referrer' => $referrer !== '' ? $referrer : null,
+			'source_type' => $sourceType !== '' ? $sourceType : null,
+			'is_tracking_endpoint' => $isTracking,
+			'is_page_request' => $isPageRequest,
+		]);
+		return true;
+	} catch (Throwable $e) {
+		return false;
+	}
+}
+
+function find_best_entry_from_access_log(string $ipAddress, string $userAgent, string $hitAtUtc): ?array
+{
+	$ipAddress = trim($ipAddress);
+	$hitAtUtc = trim($hitAtUtc);
+	if ($ipAddress === '' || $hitAtUtc === '') {
+		return null;
+	}
+
+	$hitAt = parse_db_datetime_utc($hitAtUtc);
+	if (!$hitAt) {
+		return null;
+	}
+
+	$userAgentHash = sha1(strtolower(trim($userAgent)));
+	$windowStart = $hitAt->sub(new DateInterval('PT30M'))->format('Y-m-d H:i:s');
+
+	try {
+		$pdo = db();
+		if (!table_exists($pdo, 'pd_access_log_events')) {
+			return null;
+		}
+
+		$windowStmt = db()->prepare(
+			"SELECT request_uri, referrer
+			 FROM pd_access_log_events
+			 WHERE ip_address = :ip_address
+			   AND is_page_request = 1
+			   AND hit_at BETWEEN :window_start AND :hit_at
+			 ORDER BY
+			   CASE WHEN user_agent_hash = :user_agent_hash THEN 0 ELSE 1 END,
+			   hit_at ASC,
+			   id ASC
+			 LIMIT 1"
+		);
+		$windowStmt->execute([
+			'ip_address' => $ipAddress,
+			'window_start' => $windowStart,
+			'hit_at' => $hitAtUtc,
+			'user_agent_hash' => $userAgentHash,
+		]);
+		$row = $windowStmt->fetch();
+		if ($row) {
+			return [
+				'entry_url' => trim((string) ($row['request_uri'] ?? '')),
+				'entry_referrer' => trim((string) ($row['referrer'] ?? '')),
+			];
+		}
+
+		$fallbackStmt = db()->prepare(
+			"SELECT request_uri, referrer
+			 FROM pd_access_log_events
+			 WHERE ip_address = :ip_address
+			   AND is_page_request = 1
+			   AND hit_at <= :hit_at
+			 ORDER BY
+			   CASE WHEN user_agent_hash = :user_agent_hash THEN 0 ELSE 1 END,
+			   hit_at ASC,
+			   id ASC
+			 LIMIT 1"
+		);
+		$fallbackStmt->execute([
+			'ip_address' => $ipAddress,
+			'hit_at' => $hitAtUtc,
+			'user_agent_hash' => $userAgentHash,
+		]);
+		$row = $fallbackStmt->fetch();
+		if (!$row) {
+			return null;
+		}
+
+		return [
+			'entry_url' => trim((string) ($row['request_uri'] ?? '')),
+			'entry_referrer' => trim((string) ($row['referrer'] ?? '')),
+		];
+	} catch (Throwable $e) {
+		return null;
+	}
+}
+
+function backfill_entry_urls_from_access_log(int $maxRows = 300): array
+{
+	$maxRows = max(50, min(5000, $maxRows));
+	$processed = 0;
+	$updated = 0;
+
+	$targets = [
+		[
+			'table' => 'pd_pixel_hits',
+			'select_sql' => 'SELECT id, ip_address, user_agent, hit_at FROM pd_pixel_hits WHERE (entry_url IS NULL OR TRIM(entry_url) = "") ORDER BY id DESC LIMIT :limit',
+			'update_sql' => 'UPDATE pd_pixel_hits SET entry_url = :entry_url, entry_referrer = :entry_referrer WHERE id = :id',
+		],
+		[
+			'table' => 'pd_redirect_hits',
+			'select_sql' => 'SELECT id, ip_address, user_agent, hit_at FROM pd_redirect_hits WHERE (entry_url IS NULL OR TRIM(entry_url) = "") ORDER BY id DESC LIMIT :limit',
+			'update_sql' => 'UPDATE pd_redirect_hits SET entry_url = :entry_url, entry_referrer = :entry_referrer WHERE id = :id',
+		],
+		[
+			'table' => 'pd_ad_hit_logs',
+			'select_sql' => 'SELECT id, ip_address, user_agent, hit_at FROM pd_ad_hit_logs WHERE (entry_url IS NULL OR TRIM(entry_url) = "") ORDER BY id DESC LIMIT :limit',
+			'update_sql' => 'UPDATE pd_ad_hit_logs SET entry_url = :entry_url, entry_referrer = :entry_referrer WHERE id = :id',
+		],
+	];
+
+	try {
+		$pdo = db();
+		foreach ($targets as $target) {
+			if (!table_exists($pdo, (string) $target['table'])) {
+				continue;
+			}
+
+			$remaining = $maxRows - $processed;
+			if ($remaining <= 0) {
+				break;
+			}
+
+			$selectStmt = db()->prepare((string) $target['select_sql']);
+			$selectStmt->bindValue(':limit', $remaining, PDO::PARAM_INT);
+			$selectStmt->execute();
+			$rows = $selectStmt->fetchAll();
+			if (!$rows) {
+				continue;
+			}
+
+			$updateStmt = db()->prepare((string) $target['update_sql']);
+			foreach ($rows as $row) {
+				$processed++;
+				$entry = find_best_entry_from_access_log(
+					(string) ($row['ip_address'] ?? ''),
+					(string) ($row['user_agent'] ?? ''),
+					(string) ($row['hit_at'] ?? '')
+				);
+				if (!$entry) {
+					continue;
+				}
+
+				$entryUrl = trim((string) ($entry['entry_url'] ?? ''));
+				if ($entryUrl === '') {
+					continue;
+				}
+
+				$updateStmt->execute([
+					'entry_url' => $entryUrl,
+					'entry_referrer' => trim((string) ($entry['entry_referrer'] ?? '')) !== '' ? (string) $entry['entry_referrer'] : null,
+					'id' => (int) ($row['id'] ?? 0),
+				]);
+				$updated += (int) $updateStmt->rowCount();
+
+				if ($processed >= $maxRows) {
+					break;
+				}
+			}
+		}
+	} catch (Throwable $e) {
+	}
+
+	return [
+		'processed' => $processed,
+		'updated' => $updated,
+	];
 }
 
 function normalize_source_attribution_value(string $value): string
@@ -2789,6 +3088,57 @@ function match_access_log_referrer_to_hit(array $event): bool
 
 			return true;
 		}
+
+		if ($sourceType === 'ad') {
+			if (!table_exists($pdo, 'pd_ad_hit_logs')) {
+				return false;
+			}
+
+			$whereClause = '';
+			if ($queryString !== '') {
+				$whereClause = ' AND query_string = :query_string';
+			} elseif ($requestUri !== '') {
+				$whereClause = ' AND request_uri LIKE :request_uri_like';
+			}
+
+			$uaClause = $userAgent !== '' ? " AND (user_agent = :user_agent OR user_agent IS NULL OR TRIM(user_agent) = '')" : '';
+			$select = db()->prepare(
+				"SELECT id
+				 FROM pd_ad_hit_logs
+				 WHERE ip_address = :ip_address
+				   AND (referrer IS NULL OR TRIM(referrer) = '')
+				   AND hit_at BETWEEN :window_start AND :window_end
+				   $uaClause
+				   $whereClause
+				 ORDER BY ABS(TIMESTAMPDIFF(SECOND, hit_at, :event_time)) ASC, id DESC
+				 LIMIT 1"
+			);
+			$select->bindValue(':ip_address', $ipAddress, PDO::PARAM_STR);
+			$select->bindValue(':window_start', $windowStart, PDO::PARAM_STR);
+			$select->bindValue(':window_end', $windowEnd, PDO::PARAM_STR);
+			$select->bindValue(':event_time', $hitAtUtc, PDO::PARAM_STR);
+			if ($queryString !== '') {
+				$select->bindValue(':query_string', $queryString, PDO::PARAM_STR);
+			} elseif ($requestUri !== '') {
+				$select->bindValue(':request_uri_like', '%' . $requestUri . '%', PDO::PARAM_STR);
+			}
+			if ($userAgent !== '') {
+				$select->bindValue(':user_agent', $userAgent, PDO::PARAM_STR);
+			}
+			$select->execute();
+			$row = $select->fetch();
+			if (!$row) {
+				return false;
+			}
+
+			$update = db()->prepare('UPDATE pd_ad_hit_logs SET referrer = :referrer WHERE id = :id');
+			$update->execute([
+				'referrer' => $referrer,
+				'id' => (int) $row['id'],
+			]);
+
+			return true;
+		}
 	} catch (Throwable $e) {
 		return false;
 	}
@@ -2869,6 +3219,8 @@ function process_access_log_referrer_enrichment(int $maxLines = 2500): array
 			continue;
 		}
 
+		ingest_access_log_event($rawEvent);
+
 		$actorKey = trim((string) ($rawEvent['ip_address'] ?? '')) . '|' . sha1(strtolower(trim((string) ($rawEvent['user_agent'] ?? ''))));
 		$rawReferrer = normalize_source_attribution_value((string) ($rawEvent['referrer'] ?? ''));
 		if ($rawReferrer !== '') {
@@ -2878,7 +3230,7 @@ function process_access_log_referrer_enrichment(int $maxLines = 2500): array
 			];
 		}
 
-		if (!in_array((string) ($rawEvent['source_type'] ?? ''), ['pixel', 'redirect'], true)) {
+		if (!in_array((string) ($rawEvent['source_type'] ?? ''), ['pixel', 'redirect', 'ad'], true)) {
 			continue;
 		}
 
@@ -2901,6 +3253,7 @@ function process_access_log_referrer_enrichment(int $maxLines = 2500): array
 
 	fclose($handle);
 	save_access_log_cursor($logPath, $inode, $offset);
+	$entryBackfill = backfill_entry_urls_from_access_log(max(100, (int) floor($maxLines / 2)));
 
 	return [
 		'enabled' => true,
@@ -2910,6 +3263,8 @@ function process_access_log_referrer_enrichment(int $maxLines = 2500): array
 		'updated_hits' => $updatedHits,
 		'attributed_hits' => $attributedHits,
 		'fingerprint_updates' => $fingerprintUpdates,
+		'entry_backfill_processed' => (int) ($entryBackfill['processed'] ?? 0),
+		'entry_backfill_updated' => (int) ($entryBackfill['updated'] ?? 0),
 	];
 }
 

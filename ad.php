@@ -184,6 +184,14 @@ try {
 } catch (Throwable $e) {
 }
 
+try {
+	if ($ipAddress !== '') {
+		enqueue_ip_for_enrichment($ipAddress);
+	}
+	try_start_ip_enrichment_worker(30);
+} catch (Throwable $e) {
+}
+
 if ($matchedRule) {
 	echo $matchedScript . "\n";
 	exit;
