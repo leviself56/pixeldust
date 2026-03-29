@@ -2314,20 +2314,65 @@ function try_start_ip_enrichment_worker(int $minSpawnIntervalSeconds = 30): bool
 	return true;
 }
 
-function analytics_access_log_path(): ?string
+function analytics_access_log_paths(): array
 {
 	$app = app_config()['app'] ?? [];
 	$analytics = app_config()['analytics'] ?? [];
-	$path = trim((string) ($app['access_log_path'] ?? $analytics['access_log_path'] ?? app_config()['access_log_path'] ?? ''));
-	if ($path === '') {
-		return null;
+	$root = app_config();
+
+	$candidates = [];
+
+	$singleKeys = [
+		(string) ($app['access_log_path'] ?? ''),
+		(string) ($app['access_log_path_secondary'] ?? ''),
+		(string) ($analytics['access_log_path'] ?? ''),
+		(string) ($analytics['access_log_path_secondary'] ?? ''),
+		(string) ($root['access_log_path'] ?? ''),
+		(string) ($root['access_log_path_secondary'] ?? ''),
+	];
+	foreach ($singleKeys as $path) {
+		$path = trim($path);
+		if ($path !== '') {
+			$candidates[] = $path;
+		}
 	}
 
-	if (!is_file($path) || !is_readable($path)) {
-		return null;
+	$arrayKeys = [
+		$app['access_log_paths'] ?? null,
+		$analytics['access_log_paths'] ?? null,
+		$root['access_log_paths'] ?? null,
+	];
+	foreach ($arrayKeys as $paths) {
+		if (!is_array($paths)) {
+			continue;
+		}
+		foreach ($paths as $path) {
+			$path = trim((string) $path);
+			if ($path !== '') {
+				$candidates[] = $path;
+			}
+		}
 	}
 
-	return $path;
+	$valid = [];
+	$seen = [];
+	foreach ($candidates as $path) {
+		if (isset($seen[$path])) {
+			continue;
+		}
+		$seen[$path] = true;
+		if (is_file($path) && is_readable($path)) {
+			$valid[] = $path;
+		}
+	}
+
+	return $valid;
+}
+
+function analytics_access_log_path(): ?string
+{
+	$paths = analytics_access_log_paths();
+	return $paths ? (string) $paths[0] : null;
 }
 
 function analytics_access_log_max_lines_per_run(): int
@@ -3148,10 +3193,11 @@ function match_access_log_referrer_to_hit(array $event): bool
 
 function process_access_log_referrer_enrichment(int $maxLines = 2500): array
 {
-	$logPath = analytics_access_log_path();
-	if ($logPath === null) {
+	$logPaths = analytics_access_log_paths();
+	if (!$logPaths) {
 		return [
 			'enabled' => false,
+			'paths' => [],
 			'processed_lines' => 0,
 			'matched_events' => 0,
 			'updated_hits' => 0,
@@ -3159,110 +3205,153 @@ function process_access_log_referrer_enrichment(int $maxLines = 2500): array
 	}
 
 	$maxLines = max(100, min(20000, $maxLines));
-	$fileStat = @stat($logPath);
-	if (!is_array($fileStat)) {
-		return [
-			'enabled' => true,
-			'processed_lines' => 0,
-			'matched_events' => 0,
-			'updated_hits' => 0,
-			'error' => 'access_log_unreadable',
-		];
-	}
+	$totalProcessedLines = 0;
+	$totalMatchedEvents = 0;
+	$totalUpdatedHits = 0;
+	$totalAttributedHits = 0;
+	$totalFingerprintUpdates = 0;
+	$pathResults = [];
+	$pathCount = count($logPaths);
+	$remainingLines = $maxLines;
 
-	$inode = (int) ($fileStat['ino'] ?? 0);
-	$size = (int) ($fileStat['size'] ?? 0);
-	$cursor = load_access_log_cursor($logPath);
-	$offset = (int) ($cursor['offset'] ?? 0);
-	$previousInode = (int) ($cursor['inode'] ?? 0);
-
-	if ($offset < 0 || $size < $offset || ($previousInode > 0 && $previousInode !== $inode)) {
-		$offset = 0;
-	}
-
-	$handle = @fopen($logPath, 'rb');
-	if ($handle === false) {
-		return [
-			'enabled' => true,
-			'processed_lines' => 0,
-			'matched_events' => 0,
-			'updated_hits' => 0,
-			'error' => 'access_log_open_failed',
-		];
-	}
-
-	if ($offset > 0) {
-		@fseek($handle, $offset);
-	}
-
-	$processedLines = 0;
-	$matchedEvents = 0;
-	$updatedHits = 0;
-	$attributedHits = 0;
-	$fingerprintUpdates = 0;
-	$actorReferrerChain = [];
-
-	while (!feof($handle) && $processedLines < $maxLines) {
-		$line = fgets($handle);
-		if ($line === false) {
-			break;
-		}
-
-		$processedLines++;
-		$currentOffset = ftell($handle);
-		if (is_int($currentOffset) && $currentOffset >= 0) {
-			$offset = $currentOffset;
-		}
-
-		$rawEvent = parse_apache_access_log_raw_line($line);
-		if (!$rawEvent) {
-			continue;
-		}
-
-		ingest_access_log_event($rawEvent);
-
-		$actorKey = trim((string) ($rawEvent['ip_address'] ?? '')) . '|' . sha1(strtolower(trim((string) ($rawEvent['user_agent'] ?? ''))));
-		$rawReferrer = normalize_source_attribution_value((string) ($rawEvent['referrer'] ?? ''));
-		if ($rawReferrer !== '') {
-			$actorReferrerChain[$actorKey] = [
-				'referrer' => $rawReferrer,
-				'seen_at' => (string) ($rawEvent['hit_at_utc'] ?? ''),
+	foreach ($logPaths as $pathIndex => $logPath) {
+		if ($remainingLines <= 0) {
+			$pathResults[] = [
+				'path' => $logPath,
+				'processed_lines' => 0,
+				'matched_events' => 0,
+				'updated_hits' => 0,
+				'skipped' => 'line_budget_exhausted',
 			];
-		}
-
-		if (!in_array((string) ($rawEvent['source_type'] ?? ''), ['pixel', 'redirect', 'ad'], true)) {
 			continue;
 		}
 
-		$event = $rawEvent;
-		if (trim((string) ($event['referrer'] ?? '')) === '') {
-			$event['referrer'] = derive_source_attribution_referrer($event, $actorReferrerChain[$actorKey] ?? null);
+		$pathsLeft = max(1, $pathCount - $pathIndex);
+		$pathLineBudget = $pathIndex === ($pathCount - 1)
+			? $remainingLines
+			: max(100, (int) floor($remainingLines / $pathsLeft));
+
+		$fileStat = @stat($logPath);
+		if (!is_array($fileStat)) {
+			$pathResults[] = [
+				'path' => $logPath,
+				'processed_lines' => 0,
+				'matched_events' => 0,
+				'updated_hits' => 0,
+				'error' => 'access_log_unreadable',
+			];
+			continue;
 		}
 
-		$matchedEvents++;
-		if (record_traffic_fingerprint_observation($event)) {
-			$fingerprintUpdates++;
+		$inode = (int) ($fileStat['ino'] ?? 0);
+		$size = (int) ($fileStat['size'] ?? 0);
+		$cursor = load_access_log_cursor($logPath);
+		$offset = (int) ($cursor['offset'] ?? 0);
+		$previousInode = (int) ($cursor['inode'] ?? 0);
+
+		if ($offset < 0 || $size < $offset || ($previousInode > 0 && $previousInode !== $inode)) {
+			$offset = 0;
 		}
-		if (match_access_log_referrer_to_hit($event)) {
-			$updatedHits++;
-			if (extract_source_attribution_from_query((string) ($event['query_string'] ?? '')) !== '') {
-				$attributedHits++;
+
+		$handle = @fopen($logPath, 'rb');
+		if ($handle === false) {
+			$pathResults[] = [
+				'path' => $logPath,
+				'processed_lines' => 0,
+				'matched_events' => 0,
+				'updated_hits' => 0,
+				'error' => 'access_log_open_failed',
+			];
+			continue;
+		}
+
+		if ($offset > 0) {
+			@fseek($handle, $offset);
+		}
+
+		$processedLines = 0;
+		$matchedEvents = 0;
+		$updatedHits = 0;
+		$attributedHits = 0;
+		$fingerprintUpdates = 0;
+		$actorReferrerChain = [];
+
+		while (!feof($handle) && $processedLines < $pathLineBudget) {
+			$line = fgets($handle);
+			if ($line === false) {
+				break;
+			}
+
+			$processedLines++;
+			$currentOffset = ftell($handle);
+			if (is_int($currentOffset) && $currentOffset >= 0) {
+				$offset = $currentOffset;
+			}
+
+			$rawEvent = parse_apache_access_log_raw_line($line);
+			if (!$rawEvent) {
+				continue;
+			}
+
+			ingest_access_log_event($rawEvent);
+
+			$actorKey = trim((string) ($rawEvent['ip_address'] ?? '')) . '|' . sha1(strtolower(trim((string) ($rawEvent['user_agent'] ?? ''))));
+			$rawReferrer = normalize_source_attribution_value((string) ($rawEvent['referrer'] ?? ''));
+			if ($rawReferrer !== '') {
+				$actorReferrerChain[$actorKey] = [
+					'referrer' => $rawReferrer,
+					'seen_at' => (string) ($rawEvent['hit_at_utc'] ?? ''),
+				];
+			}
+
+			if (!in_array((string) ($rawEvent['source_type'] ?? ''), ['pixel', 'redirect', 'ad'], true)) {
+				continue;
+			}
+
+			$event = $rawEvent;
+			if (trim((string) ($event['referrer'] ?? '')) === '') {
+				$event['referrer'] = derive_source_attribution_referrer($event, $actorReferrerChain[$actorKey] ?? null);
+			}
+
+			$matchedEvents++;
+			if (record_traffic_fingerprint_observation($event)) {
+				$fingerprintUpdates++;
+			}
+			if (match_access_log_referrer_to_hit($event)) {
+				$updatedHits++;
+				if (extract_source_attribution_from_query((string) ($event['query_string'] ?? '')) !== '') {
+					$attributedHits++;
+				}
 			}
 		}
+
+		fclose($handle);
+		save_access_log_cursor($logPath, $inode, $offset);
+
+		$remainingLines = max(0, $remainingLines - $processedLines);
+		$totalProcessedLines += $processedLines;
+		$totalMatchedEvents += $matchedEvents;
+		$totalUpdatedHits += $updatedHits;
+		$totalAttributedHits += $attributedHits;
+		$totalFingerprintUpdates += $fingerprintUpdates;
+		$pathResults[] = [
+			'path' => $logPath,
+			'processed_lines' => $processedLines,
+			'matched_events' => $matchedEvents,
+			'updated_hits' => $updatedHits,
+		];
 	}
 
-	fclose($handle);
-	save_access_log_cursor($logPath, $inode, $offset);
 	$entryBackfill = backfill_entry_urls_from_access_log(max(100, (int) floor($maxLines / 2)));
 
 	return [
 		'enabled' => true,
-		'path' => $logPath,
-		'processed_lines' => $processedLines,
-		'matched_events' => $matchedEvents,
-		'updated_hits' => $updatedHits,
-		'attributed_hits' => $attributedHits,
-		'fingerprint_updates' => $fingerprintUpdates,
+		'paths' => $pathResults,
+		'processed_lines' => $totalProcessedLines,
+		'matched_events' => $totalMatchedEvents,
+		'updated_hits' => $totalUpdatedHits,
+		'attributed_hits' => $totalAttributedHits,
+		'fingerprint_updates' => $totalFingerprintUpdates,
 		'entry_backfill_processed' => (int) ($entryBackfill['processed'] ?? 0),
 		'entry_backfill_updated' => (int) ($entryBackfill['updated'] ?? 0),
 	];
@@ -3272,7 +3361,7 @@ function process_ip_enrichment_queue(int $maxRows = 100, int $maxRuntimeSeconds 
 {
 	$status = analytics_table_status();
 	$hasIpQueue = $status['ip_queue'] && $status['ip_enrichment'];
-	$hasAccessLog = analytics_access_log_path() !== null;
+	$hasAccessLog = count(analytics_access_log_paths()) > 0;
 
 	if (!$hasIpQueue && !$hasAccessLog) {
 		return [
@@ -3404,7 +3493,7 @@ function process_ip_enrichment_queue(int $maxRows = 100, int $maxRuntimeSeconds 
 		$accessLogMaxLines = analytics_access_log_max_lines_per_run();
 		if ($remainingSeconds <= 0.2) {
 			$accessLogResult = [
-				'enabled' => analytics_access_log_path() !== null,
+				'enabled' => count(analytics_access_log_paths()) > 0,
 				'processed_lines' => 0,
 				'matched_events' => 0,
 				'updated_hits' => 0,
