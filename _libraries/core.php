@@ -3909,6 +3909,7 @@ function fire_trigger_action_by_id(?string $explicitTriggerId, array $context): 
 			'event' => (string) ($context['event'] ?? 'ad_match'),
 			'ad_id' => (string) ($context['ad_id'] ?? ''),
 			'ad_rule_id' => (string) ($context['ad_rule_id'] ?? ''),
+			'ad_priority' => (int) ($context['ad_priority'] ?? 0),
 			'trigger_id' => $triggerId,
 			'hit_at' => (string) ($context['hit_at'] ?? date('Y-m-d H:i:s')),
 			'ip_address' => (string) ($context['ip_address'] ?? ''),
@@ -3928,6 +3929,7 @@ function fire_trigger_action_by_id(?string $explicitTriggerId, array $context): 
 				$payload['_ad_match'] = [
 					'ad_id' => (string) ($context['ad_id'] ?? ''),
 					'ad_rule_id' => (int) ($context['ad_rule_id'] ?? 0),
+					'ad_priority' => (int) ($context['ad_priority'] ?? 0),
 				];
 				send_webhook_json((string) ($action['webhook_url'] ?? ''), $payload);
 			} catch (Throwable $e) {

@@ -166,78 +166,10 @@ if ($type === 'provider') {
 		flash('error', 'Invalid provider selected for link-out.');
 		redirect('ad-analytics.php?period=' . urlencode($period));
 	}
-
-	$bestSource = null;
-
-	try {
-		$pixelStmt = db()->prepare(
-			'SELECT pixel_key AS source_key, COUNT(*) AS hits
-			 FROM pd_hit_classification
-			 WHERE isp_guess = :provider AND classified_at >= :cutoff_utc
-			 GROUP BY pixel_key
-			 ORDER BY hits DESC, source_key ASC
-			 LIMIT 1'
-		);
-		$pixelStmt->execute([
-			'provider' => $provider,
-			'cutoff_utc' => $cutoffUtc,
-		]);
-		$pixelRow = $pixelStmt->fetch();
-		if ($pixelRow) {
-			$bestSource = [
-				'source_type' => 'pixel',
-				'source_key' => (string) ($pixelRow['source_key'] ?? ''),
-				'hits' => (int) ($pixelRow['hits'] ?? 0),
-			];
-		}
-	} catch (Throwable $e) {
-	}
-
-	try {
-		$redirectStmt = db()->prepare(
-			'SELECT redirect_key AS source_key, COUNT(*) AS hits
-			 FROM pd_redirect_hit_classification
-			 WHERE isp_guess = :provider AND classified_at >= :cutoff_utc
-			 GROUP BY redirect_key
-			 ORDER BY hits DESC, source_key ASC
-			 LIMIT 1'
-		);
-		$redirectStmt->execute([
-			'provider' => $provider,
-			'cutoff_utc' => $cutoffUtc,
-		]);
-		$redirectRow = $redirectStmt->fetch();
-		if ($redirectRow) {
-			$redirectHits = (int) ($redirectRow['hits'] ?? 0);
-			if (!$bestSource || $redirectHits > (int) ($bestSource['hits'] ?? 0)) {
-				$bestSource = [
-					'source_type' => 'redirect',
-					'source_key' => (string) ($redirectRow['source_key'] ?? ''),
-					'hits' => $redirectHits,
-				];
-			}
-		}
-	} catch (Throwable $e) {
-	}
-
-	if (!$bestSource || trim((string) ($bestSource['source_key'] ?? '')) === '') {
-		flash('error', 'No matching analytics source found for that provider in selected period.');
-		redirect('ad-analytics.php?period=' . urlencode($period));
-	}
-
-	$query = [
-		'source_type' => (string) $bestSource['source_type'],
-		'period' => $period,
+	redirect('provider-details.php?' . http_build_query([
 		'provider' => $provider,
-		'provider_page' => 1,
-	];
-	if ((string) $bestSource['source_type'] === 'redirect') {
-		$query['redirect_key'] = (string) $bestSource['source_key'];
-	} else {
-		$query['pixel_key'] = (string) $bestSource['source_key'];
-	}
-
-	redirect('analytics.php?' . http_build_query($query));
+		'period' => $period,
+	]));
 }
 
 flash('error', 'Unknown link-out target.');

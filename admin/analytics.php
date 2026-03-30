@@ -689,18 +689,10 @@ render_header('Analytics');
 					<?php foreach ($topIsps as $row): ?>
 						<?php
 						$providerName = (string) ($row['isp'] ?? 'unknown');
-						$providerParams = [
-							'source_type' => $sourceType,
-							'period' => $period,
-							'heatmap_metric' => $heatmapMetric,
+						$providerHref = 'provider-details.php?' . http_build_query([
 							'provider' => $providerName,
-						];
-						if ($sourceType === 'redirect') {
-							$providerParams['redirect_key'] = (string) $selectedSource['source_key'];
-						} else {
-							$providerParams['pixel_key'] = (string) $selectedSource['source_key'];
-						}
-						$providerHref = 'analytics.php?' . http_build_query($providerParams);
+							'period' => $period,
+						]);
 						?>
 						<tr>
 							<td><a href="<?php echo e($providerHref); ?>"><?php echo e($providerName); ?></a></td>

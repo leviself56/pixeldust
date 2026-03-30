@@ -15,7 +15,7 @@ if ($adKey === '') {
 
 try {
 	$stmt = db()->prepare(
-		'SELECT id, ad_key, rule_name, match_conditions, custom_js, action_type, action_value, run_once_enabled, run_once_period_seconds, trigger_on_match, trigger_id
+		'SELECT id, ad_key, rule_name, priority, match_conditions, custom_js, action_type, action_value, run_once_enabled, run_once_period_seconds, trigger_on_match, trigger_id
 		 FROM pd_ad_rules
 		 WHERE ad_key = :ad_key AND is_active = 1
 		 ORDER BY priority ASC, id ASC'
@@ -132,6 +132,7 @@ foreach ($rules as $rule) {
 				'event' => 'ad_match',
 				'ad_id' => (string) ($rule['ad_key'] ?? $adKey),
 				'ad_rule_id' => $ruleId,
+				'ad_priority' => (int) ($rule['priority'] ?? 0),
 				'hit_at' => date('Y-m-d H:i:s'),
 				'ip_address' => $ipAddress,
 				'user_agent' => $userAgent,

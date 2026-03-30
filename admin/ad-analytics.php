@@ -11,8 +11,10 @@ $success = flash('success');
 
 $period = (string) ($_GET['period'] ?? '7d');
 $adKeyFilter = sanitize_ad_key((string) ($_GET['ad_key'] ?? ''));
+$providerFilter = trim((string) ($_GET['provider'] ?? ''));
 $matchFilter = trim((string) ($_GET['match'] ?? 'all'));
 $sort = trim((string) ($_GET['sort'] ?? 'latest'));
+$heatmapMetric = trim((string) ($_GET['heatmap_metric'] ?? 'estimated_visits'));
 $page = max(1, (int) ($_GET['page'] ?? 1));
 $perPage = 100;
 
@@ -26,8 +28,13 @@ if (!in_array($matchFilter, ['all', 'matched', 'unmatched'], true)) {
 if (!in_array($sort, ['latest', 'matched_first', 'unmatched_first'], true)) {
 	$sort = 'latest';
 }
+$validHeatmapMetrics = ['hits', 'estimated_visits'];
+if (!in_array($heatmapMetric, $validHeatmapMetrics, true)) {
+	$heatmapMetric = 'estimated_visits';
+}
 $displayTimezoneName = app_timezone_name();
 $displayTimezone = app_timezone_object();
+$appTimezoneOffsetMinutes = (int) floor((new DateTimeImmutable('now', $displayTimezone))->getOffset() / 60);
 $formatStoredLocalTime = static function (?string $value) use ($displayTimezone): string {
 	$raw = trim((string) $value);
 	if ($raw === '') {
@@ -91,6 +98,12 @@ $recentRows = [];
 $ipTagMap = [];
 $totalRows = 0;
 $totalPages = 1;
+$heatmapRows = [];
+$heatmapGrid = [];
+$heatmapMaxHits = 0;
+$heatmapMode = 'date_hour';
+$heatmapRowOrder = [];
+$heatmapRowLabels = [];
 
 if ($schemaReady) {
 	try {
@@ -115,23 +128,34 @@ if ($schemaReady) {
 
 	$where = ['hit_at >= :cutoff_utc'];
 	$whereRecent = ['l.hit_at >= :cutoff_utc'];
+	$whereHeatmap = ['h.hit_at >= :cutoff_utc'];
 	$params = ['cutoff_utc' => $cutoffUtc];
 
 	if ($adKeyFilter !== '') {
 		$where[] = 'ad_key = :ad_key';
 		$whereRecent[] = 'l.ad_key = :ad_key';
+		$whereHeatmap[] = 'h.ad_key = :ad_key';
 		$params['ad_key'] = $adKeyFilter;
+	}
+	if ($providerFilter !== '') {
+		$where[] = "COALESCE(NULLIF(TRIM(isp_name), ''), 'unknown') = :provider";
+		$whereRecent[] = "COALESCE(NULLIF(TRIM(l.isp_name), ''), 'unknown') = :provider";
+		$whereHeatmap[] = "COALESCE(NULLIF(TRIM(h.isp_name), ''), 'unknown') = :provider";
+		$params['provider'] = $providerFilter;
 	}
 	if ($matchFilter === 'matched') {
 		$where[] = 'matched = 1';
 		$whereRecent[] = 'l.matched = 1';
+		$whereHeatmap[] = 'h.matched = 1';
 	} elseif ($matchFilter === 'unmatched') {
 		$where[] = 'matched = 0';
 		$whereRecent[] = 'l.matched = 0';
+		$whereHeatmap[] = 'h.matched = 0';
 	}
 
 	$whereSql = implode(' AND ', $where);
 	$whereRecentSql = implode(' AND ', $whereRecent);
+	$whereHeatmapSql = implode(' AND ', $whereHeatmap);
 
 	$summaryStmt = db()->prepare(
 		"SELECT
@@ -219,6 +243,74 @@ if ($schemaReady) {
 		}
 	}
 	$ipTagMap = fetch_ip_operator_tags($ipsForTagLookup);
+
+	if ($period !== 'all') {
+		$heatmapMode = 'date_hour';
+		$cutoffLocalDay = (new DateTimeImmutable($cutoffUtc, new DateTimeZone('UTC')))
+			->setTimezone($displayTimezone)
+			->setTime(0, 0, 0);
+		$todayLocalDay = (new DateTimeImmutable('now', $displayTimezone))->setTime(0, 0, 0);
+		for ($cursor = $cutoffLocalDay; $cursor <= $todayLocalDay; $cursor = $cursor->add(new DateInterval('P1D'))) {
+			$key = $cursor->format('Y-m-d');
+			$heatmapRowOrder[] = $key;
+			$heatmapRowLabels[$key] = $key;
+		}
+
+		$localHitExpr = "IFNULL(CONVERT_TZ(h.hit_at, '+00:00', :tz_name), DATE_ADD(h.hit_at, INTERVAL :tz_offset_minute MINUTE))";
+		if ($heatmapMetric === 'estimated_visits') {
+			$heatmapFingerprintExpr = "CONCAT(COALESCE(h.ip_address, ''), '|', MD5(CONCAT(COALESCE(h.user_agent, ''), '|', COALESCE(h.accept_language, ''))))";
+			$heatmapSql =
+				"WITH ordered_hits AS (
+					SELECT
+						$localHitExpr AS local_hit_at,
+						h.hit_at,
+						LAG(h.hit_at) OVER (PARTITION BY $heatmapFingerprintExpr ORDER BY h.hit_at) AS prev_hit
+					FROM pd_ad_hit_logs h
+					WHERE $whereHeatmapSql
+				)
+				SELECT DATE(local_hit_at) AS day_bucket, HOUR(local_hit_at) AS hour_idx,
+					COALESCE(SUM(CASE WHEN prev_hit IS NULL OR TIMESTAMPDIFF(MINUTE, prev_hit, hit_at) > 30 THEN 1 ELSE 0 END), 0) AS hits
+				FROM ordered_hits
+				GROUP BY day_bucket, hour_idx
+				ORDER BY day_bucket ASC, hour_idx ASC";
+		} else {
+			$heatmapSql =
+				"SELECT DATE($localHitExpr) AS day_bucket, HOUR($localHitExpr) AS hour_idx, COUNT(*) AS hits
+				 FROM pd_ad_hit_logs h
+				 WHERE $whereHeatmapSql
+				 GROUP BY day_bucket, hour_idx
+				 ORDER BY day_bucket ASC, hour_idx ASC";
+		}
+
+		$heatmapStmt = db()->prepare($heatmapSql);
+		$heatmapStmt->bindValue(':tz_name', $displayTimezoneName, PDO::PARAM_STR);
+		$heatmapStmt->bindValue(':tz_offset_minute', $appTimezoneOffsetMinutes, PDO::PARAM_INT);
+		foreach ($params as $key => $value) {
+			$heatmapStmt->bindValue(':' . $key, $value, PDO::PARAM_STR);
+		}
+		$heatmapStmt->execute();
+		$heatmapRows = $heatmapStmt->fetchAll();
+
+		foreach ($heatmapRowOrder as $rowKey) {
+			$heatmapGrid[$rowKey] = [];
+			for ($hour = 0; $hour < 24; $hour++) {
+				$heatmapGrid[$rowKey][$hour] = 0;
+			}
+		}
+
+		foreach ($heatmapRows as $heatmapRow) {
+			$rowKey = (string) ($heatmapRow['day_bucket'] ?? '');
+			$hourIdx = (int) ($heatmapRow['hour_idx'] ?? -1);
+			$hits = (int) ($heatmapRow['hits'] ?? 0);
+			if (!isset($heatmapGrid[$rowKey]) || $hourIdx < 0 || $hourIdx > 23) {
+				continue;
+			}
+			$heatmapGrid[$rowKey][$hourIdx] = $hits;
+			if ($hits > $heatmapMaxHits) {
+				$heatmapMaxHits = $hits;
+			}
+		}
+	}
 }
 
 $displayStart = 0;
@@ -323,6 +415,50 @@ render_header('Targeted Ad Analytics');
 	</div>
 </div>
 
+<?php if ($period !== 'all'): ?>
+	<div class="card">
+		<h3>Time-of-Day Heatmap (<?php echo e($displayTimezoneName); ?>)</h3>
+		<p class="muted">Visibility event concentration by date and hour. Metric: <?php echo e($heatmapMetric === 'estimated_visits' ? 'Estimated Visits (Balanced)' : 'Hits'); ?>. Darker cells indicate higher volume.</p>
+		<div style="width:100%;overflow-x:auto;">
+			<table style="min-width:980px;table-layout:fixed;font-size:0.78rem;">
+				<thead>
+					<tr>
+						<th style="width:92px;padding:4px 6px;">Date</th>
+						<?php for ($hour = 0; $hour < 24; $hour++): ?>
+							<th style="text-align:center;padding:4px 3px;"><?php echo e(str_pad((string) $hour, 2, '0', STR_PAD_LEFT)); ?></th>
+						<?php endfor; ?>
+					</tr>
+				</thead>
+				<tbody>
+				<?php foreach ($heatmapRowOrder as $rowKey): ?>
+					<tr>
+						<td style="padding:4px 6px;"><strong><?php echo e((string) ($heatmapRowLabels[$rowKey] ?? (string) $rowKey)); ?></strong></td>
+						<?php for ($hour = 0; $hour < 24; $hour++): ?>
+							<?php
+							$cellHits = (int) ($heatmapGrid[$rowKey][$hour] ?? 0);
+							$intensity = $heatmapMaxHits > 0 ? ($cellHits / $heatmapMaxHits) : 0;
+							$alpha = $intensity > 0 ? (0.08 + ($intensity * 0.82)) : 0;
+							$textColor = $alpha >= 0.58 ? '#ffffff' : '#1f2937';
+							$bgColor = $cellHits > 0 ? 'rgba(31, 78, 165, ' . number_format($alpha, 3, '.', '') . ')' : 'transparent';
+							?>
+							<td style="text-align:center;padding:4px 3px;background:<?php echo e($bgColor); ?>;color:<?php echo e($textColor); ?>;font-weight:<?php echo $cellHits > 0 ? '600' : '400'; ?>;">
+								<?php echo e((string) $cellHits); ?>
+							</td>
+						<?php endfor; ?>
+					</tr>
+				<?php endforeach; ?>
+				</tbody>
+			</table>
+		</div>
+		<p class="muted">Peak cell value in window: <?php echo e((string) $heatmapMaxHits); ?></p>
+	</div>
+<?php else: ?>
+	<div class="card">
+		<h3>Time-of-Day Heatmap</h3>
+		<p class="muted">Hidden for All Time period. Select 24h, 7d, or 30d to view hourly concentration.</p>
+	</div>
+<?php endif; ?>
+
 <div class="row" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;">
 	<div class="card">
 		<h2>Top Providers</h2>
@@ -335,7 +471,7 @@ render_header('Targeted Ad Analytics');
 				<?php foreach ($topProviders as $row): ?>
 					<?php $providerName = (string) ($row['provider_name'] ?? 'unknown'); ?>
 					<tr>
-						<td><a href="ad-linkout.php?type=provider&amp;value=<?php echo urlencode($providerName); ?>&amp;period=<?php echo urlencode($period); ?>"><?php echo e($providerName); ?></a></td>
+						<td><a href="provider-details.php?provider=<?php echo urlencode($providerName); ?>&amp;period=<?php echo urlencode($period); ?>"><?php echo e($providerName); ?></a></td>
 						<td><?php echo number_format((int) ($row['hits'] ?? 0)); ?></td>
 					</tr>
 				<?php endforeach; ?>
@@ -428,9 +564,11 @@ render_header('Targeted Ad Analytics');
 		<?php
 		$baseParams = [
 			'ad_key' => $adKeyFilter,
+			'provider' => $providerFilter,
 			'period' => $period,
 			'match' => $matchFilter,
 			'sort' => $sort,
+			'heatmap_metric' => $heatmapMetric,
 		];
 		?>
 		<div class="inline" style="margin-top:10px;">
@@ -453,9 +591,11 @@ render_header('Targeted Ad Analytics');
 			<?php endif; ?>
 			<form method="get" class="inline" style="margin:0;">
 				<input type="hidden" name="ad_key" value="<?php echo e($adKeyFilter); ?>">
+				<input type="hidden" name="provider" value="<?php echo e($providerFilter); ?>">
 				<input type="hidden" name="period" value="<?php echo e($period); ?>">
 				<input type="hidden" name="match" value="<?php echo e($matchFilter); ?>">
 				<input type="hidden" name="sort" value="<?php echo e($sort); ?>">
+				<input type="hidden" name="heatmap_metric" value="<?php echo e($heatmapMetric); ?>">
 				<label style="display:flex;align-items:center;gap:6px;">
 					<span class="muted">Go to page</span>
 					<input type="number" name="page" min="1" max="<?php echo (int) $totalPages; ?>" value="<?php echo (int) $page; ?>" style="width:88px;">
