@@ -16,6 +16,7 @@ return array (
     'session_name' => 'pixeldust_session',
     'timezone' => 'America/Chicago',
     'access_log_path' => '/var/www/dash.board/dashboard-ssl-access.log',
+    'access_log_path_secondary' => '',
   ),
 );
 
