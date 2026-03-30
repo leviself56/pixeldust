@@ -146,7 +146,40 @@ if ($provider === '') {
 
 if ($errorMessage === '') {
 	$unionSql = implode(' UNION ALL ', $parts);
-	$providerParams = array_merge($params, [$provider]);
+	$providerWhereSql = 'u.provider_name = ?';
+	$providerConditionParams = [$provider];
+
+	if (strcasecmp($provider, 'unknown') === 0) {
+		$unknownJoinSql = $hasIpEnrichment ? ' LEFT JOIN pd_ip_enrichment pe ON pe.ip_address = u.ip_address ' : '';
+		$unknownKnownIspHavingSql = $hasIpEnrichment
+			? " AND MAX(CASE WHEN pe.isp_name IS NOT NULL AND TRIM(pe.isp_name) <> '' THEN 1 ELSE 0 END) = 0"
+			: '';
+		$unknownEligibleStmt = $pdo->prepare(
+			"SELECT u.ip_address
+			 FROM ($unionSql) u
+			 $unknownJoinSql
+			 GROUP BY u.ip_address
+			 HAVING SUM(CASE WHEN u.provider_name <> 'unknown' THEN 1 ELSE 0 END) = 0
+			    AND SUM(CASE WHEN u.provider_name = 'unknown' THEN 1 ELSE 0 END) > 0
+			    $unknownKnownIspHavingSql"
+		);
+		$unknownEligibleStmt->execute($params);
+		$unknownEligibleIps = array_values(array_filter(array_map(
+			static fn($row): string => trim((string) ($row['ip_address'] ?? '')),
+			$unknownEligibleStmt->fetchAll()
+		), static fn($ip): bool => $ip !== ''));
+
+		if (!$unknownEligibleIps) {
+			$providerWhereSql = '1 = 0';
+			$providerConditionParams = [];
+		} else {
+			$ipPlaceholders = implode(', ', array_fill(0, count($unknownEligibleIps), '?'));
+			$providerWhereSql = "u.provider_name = ? AND u.ip_address IN ($ipPlaceholders)";
+			$providerConditionParams = array_merge([$provider], $unknownEligibleIps);
+		}
+	}
+
+	$providerParams = array_merge($params, $providerConditionParams);
 
 	try {
 		$summaryStmt = $pdo->prepare(
@@ -156,7 +189,7 @@ if ($errorMessage === '') {
 				MIN(u.hit_at) AS first_seen,
 				MAX(u.hit_at) AS last_seen
 			 FROM ($unionSql) u
-			 WHERE u.provider_name = ?"
+			 WHERE $providerWhereSql"
 		);
 		$summaryStmt->execute($providerParams);
 		$summary = array_merge($summary, (array) $summaryStmt->fetch());
@@ -164,7 +197,7 @@ if ($errorMessage === '') {
 		$sourceStmt = $pdo->prepare(
 			"SELECT u.source_type, COUNT(*) AS hits, COUNT(DISTINCT u.ip_address) AS unique_ips
 			 FROM ($unionSql) u
-			 WHERE u.provider_name = ?
+			 WHERE $providerWhereSql
 			 GROUP BY u.source_type
 			 ORDER BY hits DESC, u.source_type ASC"
 		);
@@ -174,7 +207,7 @@ if ($errorMessage === '') {
 		$sourceKeyStmt = $pdo->prepare(
 			"SELECT u.source_type, u.source_key, COUNT(*) AS hits
 			 FROM ($unionSql) u
-			 WHERE u.provider_name = ?
+			 WHERE $providerWhereSql
 			 GROUP BY u.source_type, u.source_key
 			 ORDER BY hits DESC, u.source_type ASC, u.source_key ASC
 			 LIMIT 30"
@@ -186,7 +219,7 @@ if ($errorMessage === '') {
 			"SELECT COUNT(*) AS total_ips FROM (
 				SELECT u.ip_address
 				FROM ($unionSql) u
-				WHERE u.provider_name = ?
+				WHERE $providerWhereSql
 				GROUP BY u.ip_address
 			) ip_rows"
 		);
@@ -201,7 +234,7 @@ if ($errorMessage === '') {
 		$ipSql =
 			"SELECT u.ip_address, COUNT(*) AS hits, MAX(u.hit_at) AS last_seen, COUNT(DISTINCT u.source_type) AS source_count
 			 FROM ($unionSql) u
-			 WHERE u.provider_name = ?
+			 WHERE $providerWhereSql
 			 GROUP BY u.ip_address
 			 ORDER BY hits DESC, last_seen DESC
 			 LIMIT ? OFFSET ?";
@@ -218,7 +251,7 @@ if ($errorMessage === '') {
 		$recentTotalStmt = $pdo->prepare(
 			"SELECT COUNT(*) AS total
 			 FROM ($unionSql) u
-			 WHERE u.provider_name = ?"
+			 WHERE $providerWhereSql"
 		);
 		$recentTotalStmt->execute($providerParams);
 		$recentTotalRows = (int) (($recentTotalStmt->fetch()['total'] ?? 0));
@@ -231,7 +264,7 @@ if ($errorMessage === '') {
 		$recentSql =
 			"SELECT u.source_type, u.source_key, u.hit_at, u.ip_address
 			 FROM ($unionSql) u
-			 WHERE u.provider_name = ?
+			 WHERE $providerWhereSql
 			 ORDER BY u.hit_at DESC
 			 LIMIT ? OFFSET ?";
 		$recentStmt = $pdo->prepare($recentSql);

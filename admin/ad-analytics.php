@@ -180,6 +180,72 @@ if ($schemaReady) {
 	$topProvidersStmt->execute($params);
 	$topProviders = $topProvidersStmt->fetchAll();
 
+	if ($providerFilter === '' && $topProviders) {
+		$unknownIndex = null;
+		foreach ($topProviders as $idx => $providerRow) {
+			if (strcasecmp((string) ($providerRow['provider_name'] ?? ''), 'unknown') === 0) {
+				$unknownIndex = $idx;
+				break;
+			}
+		}
+
+		if ($unknownIndex !== null) {
+			$unknownWhere = ['l.hit_at >= :cutoff_utc'];
+			$unknownWhereAlias2 = ['l2.hit_at >= :cutoff_utc'];
+			$unknownParams = ['cutoff_utc' => $cutoffUtc];
+
+			if ($adKeyFilter !== '') {
+				$unknownWhere[] = 'l.ad_key = :ad_key';
+				$unknownWhereAlias2[] = 'l2.ad_key = :ad_key';
+				$unknownParams['ad_key'] = $adKeyFilter;
+			}
+			if ($matchFilter === 'matched') {
+				$unknownWhere[] = 'l.matched = 1';
+				$unknownWhereAlias2[] = 'l2.matched = 1';
+			} elseif ($matchFilter === 'unmatched') {
+				$unknownWhere[] = 'l.matched = 0';
+				$unknownWhereAlias2[] = 'l2.matched = 0';
+			}
+
+			$unknownWhereSql = implode(' AND ', $unknownWhere);
+			$unknownWhereAlias2Sql = implode(' AND ', $unknownWhereAlias2);
+
+			$strictUnknownStmt = db()->prepare(
+				"SELECT
+					l.ip_address,
+					SUM(CASE WHEN COALESCE(NULLIF(TRIM(l.isp_name), ''), 'unknown') = 'unknown' THEN 1 ELSE 0 END) AS unknown_hits
+				 FROM pd_ad_hit_logs l
+				 LEFT JOIN pd_ip_enrichment pe ON pe.ip_address = l.ip_address
+				 WHERE $unknownWhereSql
+				 GROUP BY l.ip_address
+				 HAVING SUM(CASE WHEN COALESCE(NULLIF(TRIM(l.isp_name), ''), 'unknown') = 'unknown' THEN 1 ELSE 0 END) > 0
+				    AND SUM(CASE WHEN COALESCE(NULLIF(TRIM(l.isp_name), ''), 'unknown') <> 'unknown' THEN 1 ELSE 0 END) = 0
+				    AND MAX(CASE WHEN pe.isp_name IS NOT NULL AND TRIM(pe.isp_name) <> '' THEN 1 ELSE 0 END) = 0
+				    AND NOT EXISTS (
+						SELECT 1
+						FROM pd_ad_hit_logs l2
+						WHERE l2.ip_address = l.ip_address
+						  AND $unknownWhereAlias2Sql
+						  AND COALESCE(NULLIF(TRIM(l2.isp_name), ''), 'unknown') <> 'unknown'
+					)"
+			);
+			$strictUnknownStmt->execute($unknownParams);
+			$strictUnknownRows = $strictUnknownStmt->fetchAll();
+
+			$strictUnknownHits = 0;
+			foreach ($strictUnknownRows as $strictUnknownRow) {
+				$strictUnknownHits += (int) ($strictUnknownRow['unknown_hits'] ?? 0);
+			}
+
+			if ($strictUnknownHits > 0) {
+				$topProviders[$unknownIndex]['hits'] = $strictUnknownHits;
+			} else {
+				unset($topProviders[$unknownIndex]);
+				$topProviders = array_values($topProviders);
+			}
+		}
+	}
+
 	$topIpsStmt = db()->prepare(
 		"SELECT ip_address, COUNT(*) AS hits,
 			SUM(CASE WHEN matched = 1 THEN 1 ELSE 0 END) AS matched_hits,
