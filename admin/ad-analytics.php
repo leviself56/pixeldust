@@ -16,7 +16,7 @@ $matchFilter = trim((string) ($_GET['match'] ?? 'all'));
 $sort = trim((string) ($_GET['sort'] ?? 'latest'));
 $heatmapMetric = trim((string) ($_GET['heatmap_metric'] ?? 'estimated_visits'));
 $page = max(1, (int) ($_GET['page'] ?? 1));
-$perPage = 100;
+$perPage = 25;
 
 $validPeriods = ['24h', '7d', '30d', 'all'];
 if (!in_array($period, $validPeriods, true)) {
