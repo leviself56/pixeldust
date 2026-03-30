@@ -72,6 +72,8 @@ if (!$schemaReady) {
 }
 
 $operatorTags = [];
+$asnOrgValues = [];
+$ispNameValues = [];
 if ($schemaReady) {
 	try {
 	$status = analytics_table_status();
@@ -86,6 +88,32 @@ if ($schemaReady) {
 			$tag = trim((string) ($tagRow['operator_tag'] ?? ''));
 			if ($tag !== '') {
 				$operatorTags[] = $tag;
+			}
+		}
+
+		$asnOrgRows = db()->query(
+			"SELECT DISTINCT TRIM(asn_org) AS asn_org
+			 FROM pd_ip_enrichment
+			 WHERE asn_org IS NOT NULL AND TRIM(asn_org) <> ''
+			 ORDER BY asn_org ASC"
+		)->fetchAll();
+		foreach ($asnOrgRows as $asnOrgRow) {
+			$asnOrg = trim((string) ($asnOrgRow['asn_org'] ?? ''));
+			if ($asnOrg !== '') {
+				$asnOrgValues[] = $asnOrg;
+			}
+		}
+
+		$ispNameRows = db()->query(
+			"SELECT DISTINCT TRIM(isp_name) AS isp_name
+			 FROM pd_ip_enrichment
+			 WHERE isp_name IS NOT NULL AND TRIM(isp_name) <> ''
+			 ORDER BY isp_name ASC"
+		)->fetchAll();
+		foreach ($ispNameRows as $ispNameRow) {
+			$ispName = trim((string) ($ispNameRow['isp_name'] ?? ''));
+			if ($ispName !== '') {
+				$ispNameValues[] = $ispName;
 			}
 		}
 	}
@@ -117,6 +145,15 @@ if ($schemaReady && $_SERVER['REQUEST_METHOD'] === 'POST') {
 			$triggerOnMatch = isset($_POST['trigger_on_match']) ? 1 : 0;
 			$triggerId = normalize_trigger_id((string) ($_POST['trigger_id'] ?? ''));
 
+			$asnOrgOpPosted = (string) ($_POST['asn_org_op'] ?? 'equals');
+			$ispNameOpPosted = (string) ($_POST['isp_name_op'] ?? 'equals');
+			$asnOrgValuePosted = $asnOrgOpPosted === 'equals'
+				? (string) ($_POST['asn_org_value_select'] ?? ($_POST['asn_org_value'] ?? ''))
+				: (string) ($_POST['asn_org_value'] ?? '');
+			$ispNameValuePosted = $ispNameOpPosted === 'equals'
+				? (string) ($_POST['isp_name_value_select'] ?? ($_POST['isp_name_value'] ?? ''))
+				: (string) ($_POST['isp_name_value'] ?? '');
+
 			$conditions = normalize_ad_match_conditions([
 				'traffic_type' => (string) ($_POST['traffic_type'] ?? ''),
 				'user_agent_op' => (string) ($_POST['user_agent_op'] ?? 'equals'),
@@ -132,10 +169,10 @@ if ($schemaReady && $_SERVER['REQUEST_METHOD'] === 'POST') {
 				'city_value' => (string) ($_POST['city_value'] ?? ''),
 				'asn_op' => 'equals',
 				'asn_value' => (string) ($_POST['asn_value'] ?? ''),
-				'asn_org_op' => (string) ($_POST['asn_org_op'] ?? 'equals'),
-				'asn_org_value' => (string) ($_POST['asn_org_value'] ?? ''),
-				'isp_name_op' => (string) ($_POST['isp_name_op'] ?? 'equals'),
-				'isp_name_value' => (string) ($_POST['isp_name_value'] ?? ''),
+				'asn_org_op' => $asnOrgOpPosted,
+				'asn_org_value' => $asnOrgValuePosted,
+				'isp_name_op' => $ispNameOpPosted,
+				'isp_name_value' => $ispNameValuePosted,
 				'reverse_host_op' => (string) ($_POST['reverse_host_op'] ?? 'equals'),
 				'reverse_host_value' => (string) ($_POST['reverse_host_value'] ?? ''),
 			]);
@@ -357,6 +394,40 @@ $val = static function (array $conditions, string $field): string {
 	return trim((string) ($rule['value'] ?? ''));
 };
 
+$truncateLabel = static function (string $value, int $maxLen = 40): string {
+	$value = trim($value);
+	if ($value === '') {
+		return '';
+	}
+
+	if (function_exists('mb_strlen') && function_exists('mb_substr')) {
+		if (mb_strlen($value, 'UTF-8') <= $maxLen) {
+			return $value;
+		}
+		return mb_substr($value, 0, $maxLen, 'UTF-8') . '...';
+	}
+
+	if (strlen($value) <= $maxLen) {
+		return $value;
+	}
+
+	return substr($value, 0, $maxLen) . '...';
+};
+
+$editingAsnOrgOp = $op($editingConditions, 'asn_org');
+$editingAsnOrgValue = $val($editingConditions, 'asn_org');
+if ($editingAsnOrgValue !== '' && !in_array($editingAsnOrgValue, $asnOrgValues, true)) {
+	$asnOrgValues[] = $editingAsnOrgValue;
+	sort($asnOrgValues, SORT_NATURAL | SORT_FLAG_CASE);
+}
+
+$editingIspNameOp = $op($editingConditions, 'isp_name');
+$editingIspNameValue = $val($editingConditions, 'isp_name');
+if ($editingIspNameValue !== '' && !in_array($editingIspNameValue, $ispNameValues, true)) {
+	$ispNameValues[] = $editingIspNameValue;
+	sort($ispNameValues, SORT_NATURAL | SORT_FLAG_CASE);
+}
+
 render_header('Targeted Advertising');
 ?>
 <div class="spaced card">
@@ -519,23 +590,47 @@ render_header('Targeted Advertising');
 				<tr>
 					<td>asn_org</td>
 					<td>
-						<select name="asn_org_op">
-							<option value="equals" <?php echo $op($editingConditions, 'asn_org') === 'equals' ? 'selected' : ''; ?>>equals</option>
-							<option value="like" <?php echo $op($editingConditions, 'asn_org') === 'like' ? 'selected' : ''; ?>>LIKE</option>
+						<select name="asn_org_op" id="asn_org_op">
+							<option value="equals" <?php echo $editingAsnOrgOp === 'equals' ? 'selected' : ''; ?>>equals</option>
+							<option value="like" <?php echo $editingAsnOrgOp === 'like' ? 'selected' : ''; ?>>LIKE</option>
 						</select>
 					</td>
-					<td><input type="text" name="asn_org_value" maxlength="255" value="<?php echo e($val($editingConditions, 'asn_org')); ?>" placeholder="Air Link"></td>
+					<td>
+						<div id="asn_org_equals_wrap" style="display:<?php echo $editingAsnOrgOp === 'equals' ? 'block' : 'none'; ?>;">
+							<select name="asn_org_value_select" id="asn_org_value_select" <?php echo $editingAsnOrgOp === 'equals' ? '' : 'disabled'; ?>>
+								<option value="">Any</option>
+								<?php foreach ($asnOrgValues as $asnOrgValue): ?>
+									<option value="<?php echo e($asnOrgValue); ?>" <?php echo $editingAsnOrgValue === $asnOrgValue ? 'selected' : ''; ?>><?php echo e($truncateLabel($asnOrgValue)); ?></option>
+								<?php endforeach; ?>
+							</select>
+						</div>
+						<div id="asn_org_like_wrap" style="display:<?php echo $editingAsnOrgOp === 'like' ? 'block' : 'none'; ?>;">
+							<input type="text" name="asn_org_value" id="asn_org_value" maxlength="255" value="<?php echo e($editingAsnOrgValue); ?>" placeholder="Air Link or %Air Link%" <?php echo $editingAsnOrgOp === 'like' ? '' : 'disabled'; ?>>
+						</div>
+					</td>
 					<td class="muted">Organization name tied to ASN.</td>
 				</tr>
 				<tr>
 					<td>isp_name</td>
 					<td>
-						<select name="isp_name_op">
-							<option value="equals" <?php echo $op($editingConditions, 'isp_name') === 'equals' ? 'selected' : ''; ?>>equals</option>
-							<option value="like" <?php echo $op($editingConditions, 'isp_name') === 'like' ? 'selected' : ''; ?>>LIKE</option>
+						<select name="isp_name_op" id="isp_name_op">
+							<option value="equals" <?php echo $editingIspNameOp === 'equals' ? 'selected' : ''; ?>>equals</option>
+							<option value="like" <?php echo $editingIspNameOp === 'like' ? 'selected' : ''; ?>>LIKE</option>
 						</select>
 					</td>
-					<td><input type="text" name="isp_name_value" maxlength="255" value="<?php echo e($val($editingConditions, 'isp_name')); ?>" placeholder="Chariton Valley"></td>
+					<td>
+						<div id="isp_name_equals_wrap" style="display:<?php echo $editingIspNameOp === 'equals' ? 'block' : 'none'; ?>;">
+							<select name="isp_name_value_select" id="isp_name_value_select" <?php echo $editingIspNameOp === 'equals' ? '' : 'disabled'; ?>>
+								<option value="">Any</option>
+								<?php foreach ($ispNameValues as $ispNameValue): ?>
+									<option value="<?php echo e($ispNameValue); ?>" <?php echo $editingIspNameValue === $ispNameValue ? 'selected' : ''; ?>><?php echo e($truncateLabel($ispNameValue)); ?></option>
+								<?php endforeach; ?>
+							</select>
+						</div>
+						<div id="isp_name_like_wrap" style="display:<?php echo $editingIspNameOp === 'like' ? 'block' : 'none'; ?>;">
+							<input type="text" name="isp_name_value" id="isp_name_value" maxlength="255" value="<?php echo e($editingIspNameValue); ?>" placeholder="Chariton Valley or %Valley%" <?php echo $editingIspNameOp === 'like' ? '' : 'disabled'; ?>>
+						</div>
+					</td>
 					<td class="muted">ISP/provider name from enrichment data.</td>
 				</tr>
 				<tr>
@@ -689,10 +784,31 @@ render_header('Targeted Advertising');
 	var customJs = document.getElementById('custom_js');
 	var testActionButton = document.getElementById('test_action_button');
 	var testActionStatus = document.getElementById('test_action_status');
+	var asnOrgOp = document.getElementById('asn_org_op');
+	var asnOrgEqualsWrap = document.getElementById('asn_org_equals_wrap');
+	var asnOrgLikeWrap = document.getElementById('asn_org_like_wrap');
+	var asnOrgSelect = document.getElementById('asn_org_value_select');
+	var asnOrgInput = document.getElementById('asn_org_value');
+	var ispNameOp = document.getElementById('isp_name_op');
+	var ispNameEqualsWrap = document.getElementById('isp_name_equals_wrap');
+	var ispNameLikeWrap = document.getElementById('isp_name_like_wrap');
+	var ispNameSelect = document.getElementById('isp_name_value_select');
+	var ispNameInput = document.getElementById('isp_name_value');
 
 	if (!runOnceCheckbox || !runOnceWrap || !runOnceSelect || !triggerCheckbox || !triggerWrap || !triggerSelect || !actionType || !actionValueWrap || !actionValueLabel || !actionValue || !customJsWrap || !customJs || !testActionButton || !testActionStatus) {
 		return;
 	}
+
+	var syncConditionValueInput = function (operatorEl, equalsWrap, likeWrap, selectEl, inputEl) {
+		if (!operatorEl || !equalsWrap || !likeWrap || !selectEl || !inputEl) {
+			return;
+		}
+		var isEquals = (operatorEl.value || 'equals') === 'equals';
+		equalsWrap.style.display = isEquals ? 'block' : 'none';
+		likeWrap.style.display = isEquals ? 'none' : 'block';
+		selectEl.disabled = !isEquals;
+		inputEl.disabled = isEquals;
+	};
 
 	var syncRunOnce = function () {
 		var enabled = runOnceCheckbox.checked;
@@ -842,10 +958,22 @@ render_header('Targeted Advertising');
 	triggerCheckbox.addEventListener('change', syncTrigger);
 	actionType.addEventListener('change', syncAction);
 	testActionButton.addEventListener('click', runActionTest);
+	if (asnOrgOp) {
+		asnOrgOp.addEventListener('change', function () {
+			syncConditionValueInput(asnOrgOp, asnOrgEqualsWrap, asnOrgLikeWrap, asnOrgSelect, asnOrgInput);
+		});
+	}
+	if (ispNameOp) {
+		ispNameOp.addEventListener('change', function () {
+			syncConditionValueInput(ispNameOp, ispNameEqualsWrap, ispNameLikeWrap, ispNameSelect, ispNameInput);
+		});
+	}
 
 	syncRunOnce();
 	syncTrigger();
 	syncAction();
+	syncConditionValueInput(asnOrgOp, asnOrgEqualsWrap, asnOrgLikeWrap, asnOrgSelect, asnOrgInput);
+	syncConditionValueInput(ispNameOp, ispNameEqualsWrap, ispNameLikeWrap, ispNameSelect, ispNameInput);
 })();
 </script>
 <?php
