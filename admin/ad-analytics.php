@@ -104,6 +104,9 @@ $heatmapMaxHits = 0;
 $heatmapMode = 'date_hour';
 $heatmapRowOrder = [];
 $heatmapRowLabels = [];
+$providerExprBase = "COALESCE(NULLIF(TRIM(isp_name), ''), NULLIF(TRIM((SELECT pe.isp_name FROM pd_ip_enrichment pe WHERE pe.ip_address = pd_ad_hit_logs.ip_address LIMIT 1)), ''), 'unknown')";
+$providerExprRecent = "COALESCE(NULLIF(TRIM(l.isp_name), ''), NULLIF(TRIM((SELECT pe.isp_name FROM pd_ip_enrichment pe WHERE pe.ip_address = l.ip_address LIMIT 1)), ''), 'unknown')";
+$providerExprHeatmap = "COALESCE(NULLIF(TRIM(h.isp_name), ''), NULLIF(TRIM((SELECT pe.isp_name FROM pd_ip_enrichment pe WHERE pe.ip_address = h.ip_address LIMIT 1)), ''), 'unknown')";
 
 if ($schemaReady) {
 	try {
@@ -138,9 +141,9 @@ if ($schemaReady) {
 		$params['ad_key'] = $adKeyFilter;
 	}
 	if ($providerFilter !== '') {
-		$where[] = "COALESCE(NULLIF(TRIM(isp_name), ''), 'unknown') = :provider";
-		$whereRecent[] = "COALESCE(NULLIF(TRIM(l.isp_name), ''), 'unknown') = :provider";
-		$whereHeatmap[] = "COALESCE(NULLIF(TRIM(h.isp_name), ''), 'unknown') = :provider";
+		$where[] = "$providerExprBase = :provider";
+		$whereRecent[] = "$providerExprRecent = :provider";
+		$whereHeatmap[] = "$providerExprHeatmap = :provider";
 		$params['provider'] = $providerFilter;
 	}
 	if ($matchFilter === 'matched') {
@@ -170,7 +173,7 @@ if ($schemaReady) {
 	$summary = array_merge($summary, (array) $summaryStmt->fetch());
 
 	$topProvidersStmt = db()->prepare(
-		"SELECT COALESCE(NULLIF(TRIM(isp_name), ''), 'unknown') AS provider_name, COUNT(*) AS hits
+		"SELECT $providerExprBase AS provider_name, COUNT(*) AS hits
 		 FROM pd_ad_hit_logs
 		 WHERE $whereSql
 		 GROUP BY provider_name
@@ -279,7 +282,7 @@ if ($schemaReady) {
 	}
 
 	$recentSql =
-		"SELECT l.id, l.hit_at, l.ad_key, l.ip_address, l.traffic_type, l.country_code, l.isp_name, l.matched, l.matched_action_type, "
+		"SELECT l.id, l.hit_at, l.ad_key, l.ip_address, l.traffic_type, l.country_code, $providerExprRecent AS provider_name, l.matched, l.matched_action_type, "
 		. ($hasAdEntryColumns ? 'l.entry_url, l.entry_referrer, ' : 'NULL AS entry_url, NULL AS entry_referrer, ')
 		. ($hasAdRulesTable ? 'r.priority AS matched_priority' : 'NULL AS matched_priority')
 		. " FROM pd_ad_hit_logs l "
@@ -617,7 +620,7 @@ render_header('Targeted Ad Analytics');
 					<td><a href="ad-linkout.php?<?php echo e(http_build_query($recentIpLinkQuery)); ?>"><?php echo e($ipDisplay !== '' ? $ipDisplay : $ipValue); ?></a></td>
 					<td style="max-width:280px; overflow-wrap:anywhere; word-break:break-word;"><?php echo e($entryUrl !== '' ? $entryUrl : '-'); ?></td>
 					<td style="max-width:280px; overflow-wrap:anywhere; word-break:break-word;"><?php echo e($entryReferrer !== '' ? $entryReferrer : '-'); ?></td>
-					<td><?php echo e((string) (($row['isp_name'] ?? '') !== '' ? $row['isp_name'] : 'unknown')); ?></td>
+					<td><?php echo e((string) (($row['provider_name'] ?? '') !== '' ? $row['provider_name'] : 'unknown')); ?></td>
 					<td><?php echo e((string) ($row['traffic_type'] ?? 'unknown')); ?></td>
 					<td><?php echo e((string) (($row['country_code'] ?? '') !== '' ? $row['country_code'] : '-')); ?></td>
 				</tr>

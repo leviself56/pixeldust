@@ -423,9 +423,12 @@ if ($canLoadIpDetails) {
 
 		$clientExprSingle = $classAvailable ? "COALESCE(NULLIF(c.email_client_guess,''), $emailCaseExpr)" : $emailCaseExpr;
 		$trafficExprSingle = $classAvailable ? "COALESCE(NULLIF(c.traffic_type,''), 'unknown')" : "CASE WHEN $clientExprSingle IN ('gmail','yahoo_mail') THEN 'proxy' ELSE 'unknown' END";
-		$ispExprSingle = $classAvailable
-			? "COALESCE(NULLIF(c.isp_guess,''), 'unknown')"
-			: $ispExpr;
+		$joinEnrichmentSingle = $tableStatus['ip_enrichment'] ? ' LEFT JOIN pd_ip_enrichment e ON e.ip_address = h.ip_address ' : '';
+		$ispExprSingle = $classAvailable && $tableStatus['ip_enrichment']
+			? "COALESCE(NULLIF(c.isp_guess,''), NULLIF(e.isp_name,''), $ispExpr)"
+			: ($classAvailable
+				? "COALESCE(NULLIF(c.isp_guess,''), $ispExpr)"
+				: ($tableStatus['ip_enrichment'] ? "COALESCE(NULLIF(e.isp_name,''), $ispExpr)" : $ispExpr));
 
 		$summarySql =
 			"SELECT
@@ -511,6 +514,7 @@ if ($canLoadIpDetails) {
 			"SELECT $clientExprSingle AS client_name, $trafficExprSingle AS traffic_type, $ispExprSingle AS isp_name, COUNT(*) AS hits
 			 FROM $hitTable h
 			 " . ($classAvailable ? "LEFT JOIN $classTable c ON c.hit_id = h.id" : '') . "
+			 $joinEnrichmentSingle
 			 WHERE $sourceFilterSql AND h.ip_address = :ip_address AND h.hit_at >= :cutoff_utc
 			 GROUP BY client_name, traffic_type, isp_name
 			 ORDER BY hits DESC";
