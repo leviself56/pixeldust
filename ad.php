@@ -21,15 +21,30 @@ try {
 		 ORDER BY priority ASC, id ASC'
 	);
 	$stmt->execute(['ad_key' => $adKey]);
-	$rules = $stmt->fetchAll();
+	$rawRules = $stmt->fetchAll();
 } catch (Throwable $e) {
 	echo "/* ad.js: rules unavailable */\n";
 	exit;
 }
 
-if (!$rules) {
+if (!$rawRules) {
 	echo "/* ad.js: no active rules for id */\n";
 	exit;
+}
+
+$rules = [];
+$requiresEnrichmentForMatching = false;
+$enrichmentDependentFields = ['operator_tag', 'country_code', 'region', 'city', 'asn', 'asn_org', 'isp_name', 'reverse_host'];
+foreach ($rawRules as $rawRule) {
+	$conditions = decode_ad_match_conditions((string) ($rawRule['match_conditions'] ?? ''));
+	foreach ($enrichmentDependentFields as $field) {
+		if (isset($conditions[$field]) && trim((string) ($conditions[$field]['value'] ?? '')) !== '') {
+			$requiresEnrichmentForMatching = true;
+			break;
+		}
+	}
+	$rawRule['_decoded_conditions'] = $conditions;
+	$rules[] = $rawRule;
 }
 
 $ipAddress = substr((string) ($_SERVER['REMOTE_ADDR'] ?? ''), 0, 45);
@@ -43,7 +58,7 @@ $remoteHost = substr((string) ($_SERVER['REMOTE_HOST'] ?? ''), 0, 255);
 $enrichment = [];
 if ($ipAddress !== '' && filter_var($ipAddress, FILTER_VALIDATE_IP) !== false) {
 	try {
-		$enrichment = ensure_ip_enrichment($ipAddress, false);
+		$enrichment = ensure_ip_enrichment($ipAddress, $requiresEnrichmentForMatching);
 	} catch (Throwable $e) {
 		$enrichment = [];
 	}
@@ -82,7 +97,9 @@ $matchedRule = null;
 $matchedScript = '';
 
 foreach ($rules as $rule) {
-	$conditions = decode_ad_match_conditions((string) ($rule['match_conditions'] ?? ''));
+	$conditions = is_array($rule['_decoded_conditions'] ?? null)
+		? (array) $rule['_decoded_conditions']
+		: decode_ad_match_conditions((string) ($rule['match_conditions'] ?? ''));
 	if (!ad_rule_matches_context($conditions, $context)) {
 		continue;
 	}
