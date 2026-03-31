@@ -41,13 +41,13 @@ $formatStoredLocalTime = static function (?string $value) use ($displayTimezone)
 		return '-';
 	}
 
-	$dateTimeLocal = DateTimeImmutable::createFromFormat('Y-m-d H:i:s', $raw, $displayTimezone);
-	if ($dateTimeLocal instanceof DateTimeImmutable) {
-		return $dateTimeLocal->format('Y-m-d H:i:s');
+	$dateTimeUtc = DateTimeImmutable::createFromFormat('Y-m-d H:i:s', $raw, new DateTimeZone('UTC'));
+	if ($dateTimeUtc instanceof DateTimeImmutable) {
+		return $dateTimeUtc->setTimezone($displayTimezone)->format('Y-m-d H:i:s');
 	}
 
 	try {
-		return (new DateTimeImmutable($raw, $displayTimezone))->format('Y-m-d H:i:s');
+		return (new DateTimeImmutable($raw, new DateTimeZone('UTC')))->setTimezone($displayTimezone)->format('Y-m-d H:i:s');
 	} catch (Throwable $e) {
 		return '-';
 	}

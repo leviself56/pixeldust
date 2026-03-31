@@ -95,6 +95,7 @@ $context = [
 
 $matchedRule = null;
 $matchedScript = '';
+$nowUtc = (new DateTimeImmutable('now', new DateTimeZone('UTC')))->format('Y-m-d H:i:s');
 
 foreach ($rules as $rule) {
 	$conditions = is_array($rule['_decoded_conditions'] ?? null)
@@ -109,7 +110,7 @@ foreach ($rules as $rule) {
 	$runOncePeriodSeconds = (int) ($rule['run_once_period_seconds'] ?? 0);
 	if ($runOnceEnabled && $runOncePeriodSeconds > 0 && $ruleId > 0) {
 		try {
-			$cutoff = (new DateTimeImmutable('now', app_timezone_object()))
+			$cutoff = (new DateTimeImmutable('now', new DateTimeZone('UTC')))
 				->sub(new DateInterval('PT' . $runOncePeriodSeconds . 'S'))
 				->format('Y-m-d H:i:s');
 
@@ -150,7 +151,7 @@ foreach ($rules as $rule) {
 				'ad_id' => (string) ($rule['ad_key'] ?? $adKey),
 				'ad_rule_id' => $ruleId,
 				'ad_priority' => (int) ($rule['priority'] ?? 0),
-				'hit_at' => date('Y-m-d H:i:s'),
+				'hit_at' => $nowUtc,
 				'ip_address' => $ipAddress,
 				'user_agent' => $userAgent,
 				'referrer' => $referrer,
@@ -173,7 +174,7 @@ try {
 		 VALUES
 		 (:ad_key, :hit_at, :ip_address, :user_agent, :referrer, :request_uri, :query_string, :accept_language, :remote_host, :traffic_type, :operator_tag, :country_code, :region, :city, :asn, :asn_org, :isp_name, :reverse_host, :matched, :matched_rule_id, :matched_rule_name, :matched_action_type, :created_at)'
 	);
-	$hitAt = date('Y-m-d H:i:s');
+	$hitAt = $nowUtc;
 	$logStmt->execute([
 		'ad_key' => $adKey,
 		'hit_at' => $hitAt,
