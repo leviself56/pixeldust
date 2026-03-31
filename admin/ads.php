@@ -192,9 +192,6 @@ if ($schemaReady && $_SERVER['REQUEST_METHOD'] === 'POST') {
 			}
 
 			if ($actionType === 'custom_js') {
-				if ($customJs === '') {
-					throw new RuntimeException('Custom JS is required when action type is Custom JS.');
-				}
 				$actionValue = '';
 			} elseif ($actionType === 'inline_image' || $actionType === 'popup_image') {
 				if ($actionValue === '' || !filter_var($actionValue, FILTER_VALIDATE_URL)) {
@@ -833,7 +830,7 @@ render_header('Targeted Advertising');
 		var isCustom = type === 'custom_js';
 		customJsWrap.style.display = isCustom ? 'block' : 'none';
 		actionValueWrap.style.display = isCustom ? 'none' : 'block';
-		customJs.required = isCustom;
+		customJs.required = false;
 		actionValue.required = !isCustom;
 
 		if (type === 'inline_image') {
